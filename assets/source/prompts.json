@@ -1,0 +1,57 @@
+{
+  "generator": "mcp__magpie_image__generate_image",
+  "model": "agnes/agnes-image-2.5-flash",
+  "created": "2026-11-27",
+  "sources": [
+    {
+      "path": "assets/source/ui-icon-atlas.png",
+      "prompt": "Use case: logo-brand. Production asset: a precise UI icon atlas for a refined study notebook app. 1024x1024 PNG with REAL transparent alpha background (not white, not a drawn checkerboard). Arrange exactly 16 independent icons in a perfectly even 4-column by 4-row grid. Each invisible cell is 256x256, centered at x=128,384,640,896 and y=128,384,640,896. Each icon fits inside a 156x156 box in its cell with generous empty transparent margin. Same clean bold rounded monoline style throughout, stroke thickness 16px, forest green #183F35, tiny restrained sage green accents. Order left to right, top to bottom: row 1: today as simple sun with eight rays; library as single closed book; statistics as three vertical rounded bars; settings as three horizontal slider tracks with round knobs. Row 2: right arrow; pencil; plus; magnifying glass search. Row 3: check mark in circle; refresh as two curved arrows; download arrow into tray; upload arrow from tray. Row 4: left arrow; close X; warning triangle with exclamation; two overlapping flashcards. Crisp flat shapes, suitable at 24px, all same visual weight. Absolutely NO text, labels, numbers, decorative marks, dividers, grid lines, square backgrounds, checkerboards, shadows or gradients. The empty canvas must have alpha=0.",
+      "processing": "Opaque white background extracted to alpha; equal 4x4 crops; trim alpha; 200px longest dimension centered on transparent 256px canvas."
+    },
+    {
+      "path": "assets/source/app-icon.png",
+      "prompt": "Use case: logo-brand. Production app icon for an elegant vocabulary study app, exact 1024x1024 square. Full-bleed solid deep forest green #183F35 background covering all four square corners; NO rounded outer corner, no border. A striking simple centered ivory #F8F5EB open-book symbol with one flowing looping page, visually suggesting a book and a learning loop together. Only a tiny muted brass #B69B66 bookmark accent. Confident smooth rounded geometry, flat vector-like editorial stationery aesthetic. Large central mark occupying about 65% width, strong silhouette recognizable at 32px. No letters, no words, no text, no gradient, no photographic texture, no glow, no shadow, no scenery, no additional symbols.",
+      "processing": "Crop 40px per outer side to remove generated white rounded corners; resize and convert to platform formats."
+    },
+    {
+      "path": "assets/source/study-books.png",
+      "prompt": "Use case: stylized-concept. Production editorial illustration for a refined study notebook app. Exact square 1024x1024 PNG with REAL transparent alpha background, no opaque backdrop and no drawn checkerboard. Centered still life occupying middle 75%: one ivory #F8F5EB open notebook resting with two beautifully composed forest green #183F35 closed books, a small muted brass #B69B66 ribbon bookmark, and one delicate sage green botanical sprig. Tasteful premium stationery illustration with gently dimensional clean shapes and restrained fine detail, calm adult editorial aesthetic, not childish cartoon. Subtle material shading on the objects only, crisp clean contour, enough negative transparent space on every side. NO text, letters, lettering, watermarks, floor, background, decorative frame or hard cast shadow.",
+      "processing": "Preserve native RGBA transparency and resize to 512x512."
+    }
+  ],
+  "failedCorrections": [
+    {
+      "source": "ui-icon-atlas.png",
+      "prompt": "Edit this image ONLY to remove the white/off-white background into genuine PNG transparency alpha=0, including empty centers of line icons. Preserve every forest-green/sage stroke pixel, all sixteen exact symbols, positions, sizes, and the 4x4 arrangement. Keep anti-aliased contours. Output must be transparent, not a white background, not a checkerboard. This is a UI sprite atlas that will be cropped. The background must not exist in RGBA; empty corners and gutters must have zero opacity.",
+      "result": "Agnes reference image edit rejected by provider (403); Grok model rejected as unavailable."
+    },
+    {
+      "source": "app-icon.png",
+      "prompt": "Edit this app icon only to extend its existing deep forest-green solid background across ALL corners. Remove ALL white rounded-corner areas: all 1024x1024 pixels are inside a square dark-green icon. Keep the exact ivory book mark and brass bookmark unchanged. Absolutely no white border and no rounded corners. Opaque solid full-bleed square background, including pixels at (0,0), (1023,0), (0,1023), (1023,1023).",
+      "result": "Agnes reference image edit rejected by provider (403); Grok model rejected as unavailable."
+    },
+    {
+      "source": "study-books.png",
+      "prompt": "Background extraction edit: remove EVERY purple/magenta background pixel from this image and deliver a genuine transparent PNG with alpha=0 surrounding the books and botanical sprig. Preserve the exact ivory open notebook, two green books, sage leaves and brass bookmark. No other change to objects, composition, style or scale. No substitute colored, white or checkerboard background. Clean anti-aliased object edges without purple fringe. Empty canvas must be truly transparent.",
+      "result": "Agnes reference image edit rejected by provider (403); Grok model rejected as unavailable."
+    }
+  ],
+  "icons": [
+    "today",
+    "library",
+    "stats",
+    "settings",
+    "arrow_right",
+    "pencil",
+    "plus",
+    "search",
+    "check",
+    "refresh",
+    "download",
+    "upload",
+    "arrow_left",
+    "close",
+    "warning",
+    "cards"
+  ]
+}
