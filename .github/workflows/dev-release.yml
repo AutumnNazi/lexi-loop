@@ -78,7 +78,15 @@ jobs:
       - name: Android development APK
         if: matrix.target == 'android'
         run: |
-          flutter build apk --release --build-number=${{ github.run_number }}
+          for attempt in 1 2 3; do
+            if flutter build apk --release --build-number=${{ github.run_number }} 2>&1 | tee android-build.log; then
+              break
+            fi
+            if [ "$attempt" = 3 ] || ! grep -Eq '429|Too Many Requests|timed out|Connection reset' android-build.log; then
+              exit 1
+            fi
+            sleep $((attempt * 30))
+          done
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk dist/lexi-loop-android.apk
       - name: macOS unsigned package

@@ -207,10 +207,10 @@ macOS 的 Debug/Profile 与 Release entitlements 已声明 `com.apple.security.f
 
 | 平台 | 已完成 | 尚未验证 / 当前限制 |
 | --- | --- | --- |
-| Windows | 平台工程、依赖下载、代码生成、静态分析、单元和 Widget 测试 | `flutter pub get` 最后在插件符号链接阶段失败，未启用开发者模式；原生运行、文件选择器交互、安装包构建均未验证。 |
-| macOS | 平台工程、用户选择文件读写 entitlement | 未在 macOS 主机上构建或运行，未验证原生备份文件交互。 |
+| Windows | 平台工程、本地测试；GitHub Actions 的 Release 构建成功 | 本机开发者模式未启用，原生启动与文件选择器未实测。 |
+| macOS | 平台工程、文件权限；GitHub macOS runner 的 Release 构建成功 | 未公证，原生运行及文件交互未实测。 |
 | Android | 平台工程 | 未完成模拟器或真机运行、原生备份交互和 APK 构建验证。 |
-| iOS | 平台工程 | 未完成模拟器或真机运行、原生备份交互、签名与安装包验证。 |
+| iOS | 平台工程；GitHub macOS runner 的未签名 Release 构建成功 | 未签名，设备安装与原生交互未实测。 |
 
 `build/journal-review` 中的截图来自 Widget 渲染器和测试数据，不是四端真机运行证据，截图探针也不计入上述 43 项测试。当前结果证明已列出的逻辑和 Widget 检查通过，不代表四端原生发布包已通过验收。
 

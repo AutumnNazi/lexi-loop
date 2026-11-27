@@ -61,7 +61,8 @@ def main() -> None:
         if bbox is None:
             raise ValueError(f"Empty icon: {name}")
         artwork = tile.crop(bbox)
-        artwork.thumbnail((200, 200), RESAMPLE)
+        scale = 200 / max(artwork.size)
+        artwork = artwork.resize((round(artwork.width * scale), round(artwork.height * scale)), RESAMPLE)
         output = Image.new("RGBA", (256, 256))
         output.alpha_composite(artwork, ((256 - artwork.width) // 2, (256 - artwork.height) // 2))
         save_png(output, ROOT / "assets" / "icons" / f"{name}.png", 256)

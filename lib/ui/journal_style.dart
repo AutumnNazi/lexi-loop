@@ -78,7 +78,7 @@ ThemeData journalTheme(Brightness brightness, {String? fontFamily}) {
         onSurface: dark ? const Color(0xFFE9EDE5) : const Color(0xFF233D33),
         onSurfaceVariant: dark
             ? const Color(0xFFB4C2B7)
-            : const Color(0xFF647369),
+            : const Color(0xFF627167),
         outlineVariant: dark
             ? const Color(0xFF45554A)
             : const Color(0xFFDCE2D7),
