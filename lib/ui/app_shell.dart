@@ -78,6 +78,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   void _select(int index) {
+    unawaited(widget.dependencies.pronunciation.stop());
     if (_index != index) setState(() => _index = index);
     _refresh();
   }

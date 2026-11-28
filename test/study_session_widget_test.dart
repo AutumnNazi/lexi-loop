@@ -40,11 +40,24 @@ void main() {
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
   }
 
+  Future<void> finishNewWordBrowse(WidgetTester tester) async {
+    final next = find.byKey(const ValueKey('new-word-browse-next'));
+    for (var i = 0; i < 10 && next.evaluate().isNotEmpty; i++) {
+      await tester.ensureVisible(next);
+      await tester.tap(next);
+      await tester.pumpAndSettle();
+    }
+    expect(next, findsNothing);
+  }
+
   Future<void> revealAndRate(
     WidgetTester tester, {
     required String label,
   }) async {
-    await tester.tap(find.text('回忆 · 揭晓释义'));
+    await finishNewWordBrowse(tester);
+    final reveal = find.text('回忆 · 揭晓释义');
+    await tester.ensureVisible(reveal);
+    await tester.tap(reveal);
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text(label));
     await tester.tap(find.text(label));
@@ -144,6 +157,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await finishNewWordBrowse(tester);
     await tester.tap(find.text('回忆 · 揭晓释义'));
     await tester.pumpAndSettle();
 
@@ -344,6 +358,7 @@ void main() {
     await tester.pumpAndSettle();
     final current = items[0];
     expect(find.text(current.word.spelling), findsOneWidget);
+    await finishNewWordBrowse(tester);
     await tester.tap(find.text('回忆 · 揭晓释义'));
     await tester.pumpAndSettle();
     expect(find.text(current.sense.definition), findsOneWidget);
@@ -368,6 +383,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('bloom'), findsOneWidget);
+    await finishNewWordBrowse(tester);
     await tester.tap(find.text('回忆 · 揭晓释义'));
     await tester.pumpAndSettle();
     expect(find.text('开花；绽放'), findsOneWidget);
@@ -385,7 +401,12 @@ void main() {
     );
     dependencies.repository.refresh();
     await tester.pumpAndSettle();
-    expect(find.text('回忆 · 揭晓释义'), findsOneWidget);
+    expect(find.text('新词先看 1 / 5'), findsOneWidget);
+    expect(find.text('刷新后的新释义'), findsOneWidget);
+    expect(find.text('开花；绽放'), findsNothing);
+    expect(find.text('回忆 · 揭晓释义'), findsNothing);
+    await finishNewWordBrowse(tester);
+    expect(find.text('新词测试 1 / 5'), findsOneWidget);
     expect(find.text('刷新后的新释义'), findsNothing);
     await tester.tap(find.text('回忆 · 揭晓释义'));
     await tester.pumpAndSettle();
@@ -450,6 +471,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text(initialStatus.items.first.word.spelling), findsOneWidget);
+    await finishNewWordBrowse(tester);
     await tester.tap(find.text('回忆 · 揭晓释义'));
     await tester.pumpAndSettle();
 
@@ -490,6 +512,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await finishNewWordBrowse(tester);
     await tester.tap(find.text('回忆 · 揭晓释义'));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('本轮小结'));
@@ -631,4 +654,509 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
   }
+
+  testWidgets('新词先浏览完整一组五词，再进入隐藏释义测试并取下一组', (tester) async {
+    await surface(tester);
+    final items = await dependencies.repository.entries(
+      wordbookId: 'cet4',
+      limit: 6,
+    );
+    await dependencies.repository.createWordbook(
+      '新词组',
+      items.map((item) => item.sense.id).toSet(),
+    );
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await dependencies.repository.setActiveWordbook(book.id);
+    await dependencies.repository.setDailyGoal(6);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: StudyPage(dependencies: dependencies, todayPlan: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('new-word-browse-progress')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('new-word-browse-next')), findsOneWidget);
+    expect(find.text('新词先看 1 / 5'), findsOneWidget);
+    expect(find.text(items[0].sense.definition), findsOneWidget);
+    expect(find.text('回忆 · 揭晓释义'), findsNothing);
+    expect(await dependencies.repository.history(), isEmpty);
+    expect(
+      await dependencies.database
+          .select(dependencies.database.memoryStates)
+          .get(),
+      isEmpty,
+    );
+
+    final next = find.byKey(const ValueKey('new-word-browse-next'));
+    for (var index = 1; index < 5; index++) {
+      await tester.ensureVisible(next);
+      await tester.tap(next);
+      await tester.pumpAndSettle();
+      expect(find.text('新词先看 ${index + 1} / 5'), findsOneWidget);
+      expect(find.text(items[index].sense.definition), findsOneWidget);
+    }
+    await tester.ensureVisible(next);
+    await tester.tap(next);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('new-word-test-progress')),
+      findsOneWidget,
+    );
+    expect(find.text('新词测试 1 / 5'), findsOneWidget);
+    expect(find.text(items[0].sense.definition), findsNothing);
+    expect(await dependencies.repository.history(), isEmpty);
+
+    for (var index = 0; index < 5; index++) {
+      await revealAndRate(tester, label: 'Good · 记得');
+      if (index == 0) {
+        expect(find.textContaining('本轮已评 1 次 · 当前待学 5'), findsOneWidget);
+      }
+    }
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 1 / 1'), findsOneWidget);
+    expect(find.text(items[5].sense.definition), findsOneWidget);
+    expect(await dependencies.repository.history(), hasLength(5));
+    expect(
+      await dependencies.database
+          .select(dependencies.database.memoryStates)
+          .get(),
+      hasLength(5),
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('到期回顾优先，完成后才进入新词浏览组', (tester) async {
+    await surface(tester);
+    final items = await dependencies.repository.entries(
+      wordbookId: 'cet4',
+      limit: 6,
+    );
+    await dependencies.repository.createWordbook(
+      '到期后新词',
+      items.map((item) => item.sense.id).toSet(),
+    );
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await dependencies.repository.setActiveWordbook(book.id);
+    await dependencies.repository.setDailyGoal(6);
+    final card = await dependencies.repository.score(
+      items[0],
+      fsrs.Rating.good,
+      eventId: newReviewEventId(),
+    );
+    now = card.due;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: StudyPage(dependencies: dependencies, todayPlan: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('回忆 · 揭晓释义'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('new-word-browse-progress')),
+      findsNothing,
+    );
+    await revealAndRate(tester, label: 'Good · 记得');
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('new-word-browse-progress')),
+      findsOneWidget,
+    );
+    expect(find.text('新词先看 1 / 5'), findsOneWidget);
+    expect(find.text('回忆 · 揭晓释义'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('新词测试首学撤销回到已浏览待测状态', (tester) async {
+    await surface(tester);
+    final item = (await dependencies.repository.entries(
+      wordbookId: 'cet4',
+      limit: 1,
+    )).single;
+    await dependencies.repository.createWordbook('撤销浏览', {item.sense.id});
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await dependencies.repository.setActiveWordbook(book.id);
+    await dependencies.repository.setDailyGoal(1);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: StudyPage(dependencies: dependencies, todayPlan: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 1 / 1'), findsOneWidget);
+    final next = find.byKey(const ValueKey('new-word-browse-next'));
+    await tester.ensureVisible(next);
+    await tester.tap(next);
+    await tester.pumpAndSettle();
+    expect(find.text('新词测试 1 / 1'), findsOneWidget);
+    await revealAndRate(tester, label: 'Good · 记得');
+    await tester.ensureVisible(find.byKey(const ValueKey('undo-last-score')));
+    await tester.tap(find.byKey(const ValueKey('undo-last-score')));
+    await tester.pumpAndSettle();
+    expect(find.text('新词测试 1 / 1'), findsOneWidget);
+    expect(find.byKey(const ValueKey('new-word-browse-next')), findsNothing);
+    expect(find.text(item.sense.definition), findsNothing);
+    expect(await dependencies.repository.history(), isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('新词浏览刷新保持阶段，内容变化后旧组失效', (tester) async {
+    await surface(tester);
+    final items = await dependencies.repository.entries(
+      wordbookId: 'cet4',
+      limit: 5,
+    );
+    await dependencies.repository.createWordbook(
+      '刷新浏览',
+      items.map((item) => item.sense.id).toSet(),
+    );
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await dependencies.repository.setActiveWordbook(book.id);
+    await dependencies.repository.setDailyGoal(5);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: StudyPage(dependencies: dependencies, todayPlan: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final next = find.byKey(const ValueKey('new-word-browse-next'));
+    await tester.ensureVisible(next);
+    await tester.tap(next);
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 2 / 5'), findsOneWidget);
+    dependencies.repository.refresh();
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 2 / 5'), findsOneWidget);
+    expect(find.text(items[1].sense.definition), findsOneWidget);
+
+    await (dependencies.database.update(dependencies.database.wordSenses)
+          ..where((row) => row.id.equals(items[1].sense.id)))
+        .write(const WordSensesCompanion(definition: Value('刷新后的新释义')));
+    dependencies.repository.refresh();
+    await tester.pumpAndSettle();
+    expect(find.text('刷新后的新释义'), findsOneWidget);
+    expect(find.text(items[1].sense.definition), findsNothing);
+    expect(await dependencies.repository.history(), isEmpty);
+    expect(
+      await dependencies.database
+          .select(dependencies.database.memoryStates)
+          .get(),
+      isEmpty,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('新词浏览 Space 前进而不写库', (tester) async {
+    await surface(tester, width: 1280, scale: 1.0);
+    final items = await dependencies.repository.entries(
+      wordbookId: 'cet4',
+      limit: 2,
+    );
+    await dependencies.repository.createWordbook(
+      '快捷键浏览',
+      items.map((item) => item.sense.id).toSet(),
+    );
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await dependencies.repository.setActiveWordbook(book.id);
+    await dependencies.repository.setDailyGoal(2);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: StudyPage(dependencies: dependencies, todayPlan: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 1 / 2'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 2 / 2'), findsOneWidget);
+    expect(find.text(items[1].sense.definition), findsOneWidget);
+    expect(await dependencies.repository.history(), isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('新词浏览按钮同帧连点只前进一个词', (tester) async {
+    await surface(tester);
+    final items = await dependencies.repository.entries(
+      wordbookId: 'cet4',
+      limit: 5,
+    );
+    await dependencies.repository.createWordbook(
+      '连点浏览',
+      items.map((item) => item.sense.id).toSet(),
+    );
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await dependencies.repository.setActiveWordbook(book.id);
+    await dependencies.repository.setDailyGoal(5);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: StudyPage(dependencies: dependencies, todayPlan: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final button = tester.widget<FilledButton>(
+      find.byKey(const ValueKey('new-word-browse-next')),
+    );
+    button.onPressed!();
+    button.onPressed!();
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 2 / 5'), findsOneWidget);
+    expect(find.text(items[1].sense.definition), findsOneWidget);
+    expect(await dependencies.repository.history(), isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('浏览中外部把每日新词目标改为 0，旧新词组安全失效', (tester) async {
+    await surface(tester);
+    final items = await dependencies.repository.entries(
+      wordbookId: 'cet4',
+      limit: 5,
+    );
+    await dependencies.repository.createWordbook(
+      '目标归零',
+      items.map((item) => item.sense.id).toSet(),
+    );
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await dependencies.repository.setActiveWordbook(book.id);
+    await dependencies.repository.setDailyGoal(5);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: StudyPage(dependencies: dependencies, todayPlan: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 1 / 5'), findsOneWidget);
+    await dependencies.repository.setDailyGoal(0);
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 1 / 5'), findsNothing);
+    expect(find.text('今天只安排复习'), findsOneWidget);
+    expect(await dependencies.repository.history(), isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('浏览中切换学习词书，旧组失效并按新范围重新取词', (tester) async {
+    await surface(tester);
+    final ces = await dependencies.repository.entries(
+      wordbookId: 'cet4',
+      limit: 5,
+    );
+    await dependencies.repository.createWordbook(
+      '切书前',
+      ces.map((item) => item.sense.id).toSet(),
+    );
+    final firstBook = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    final next = (await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      limit: 1,
+    )).single;
+    await dependencies.repository.createWordbook('切书后', {next.sense.id});
+    final secondBook = (await dependencies.repository.books()).singleWhere(
+      (book) => book.name == '切书后',
+    );
+    await dependencies.repository.setActiveWordbook(firstBook.id);
+    await dependencies.repository.setDailyGoal(5);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: StudyPage(dependencies: dependencies, todayPlan: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 1 / 5'), findsOneWidget);
+    await dependencies.repository.setActiveWordbook(secondBook.id);
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 1 / 1'), findsOneWidget);
+    expect(find.text(next.sense.definition), findsOneWidget);
+    expect(await dependencies.repository.history(), isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('新词评分写入后离开页面，不更新已销毁页面', (tester) async {
+    await surface(tester);
+    await dependencies.repository.setDailyGoal(2);
+    final summaryGate = Completer<StudySessionSummary>();
+    var gateEnabled = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: StudyPage(
+          dependencies: dependencies,
+          sessionSummaryLoader: (ids) {
+            if (gateEnabled) return summaryGate.future;
+            return dependencies.repository.sessionSummary(ids);
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await finishNewWordBrowse(tester);
+    await tester.tap(find.text('回忆 · 揭晓释义'));
+    await tester.pumpAndSettle();
+    gateEnabled = true;
+    await tester.tap(find.text('Good · 记得'));
+    for (var i = 0; i < 30; i++) {
+      await tester.pump(const Duration(milliseconds: 10));
+      if ((await dependencies.repository.history()).isNotEmpty) break;
+    }
+    expect(await dependencies.repository.history(), hasLength(1));
+    await tester.pumpWidget(const SizedBox());
+    summaryGate.complete(const StudySessionSummary.empty());
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('新词浏览中途返回提示不记为已学，已评部分保留', (tester) async {
+    await surface(tester);
+    await dependencies.repository.setDailyGoal(2);
+    final navigatorKey = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: navigatorKey,
+        theme: journalTheme(Brightness.light),
+        home: const Scaffold(body: Text('学习入口')),
+      ),
+    );
+    final navigator = navigatorKey.currentState!;
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => StudyPage(dependencies: dependencies),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 1 / 2'), findsOneWidget);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('结束本组新词学习？'), findsOneWidget);
+    expect(find.textContaining('离开不会记为已学'), findsOneWidget);
+    final keep = tester
+        .widget<TextButton>(find.widgetWithText(TextButton, '继续学习'))
+        .onPressed!;
+    keep();
+    keep();
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 1 / 2'), findsOneWidget);
+    expect(await dependencies.repository.history(), isEmpty);
+
+    await finishNewWordBrowse(tester);
+    await tester.tap(find.text('回忆 · 揭晓释义'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Good · 记得'));
+    await tester.pumpAndSettle();
+    expect(await dependencies.repository.history(), hasLength(1));
+
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('结束本组新词学习？'), findsOneWidget);
+    expect(find.textContaining('1 个词义已保存'), findsOneWidget);
+    final leave = tester
+        .widget<FilledButton>(find.widgetWithText(FilledButton, '退出并保留已评'))
+        .onPressed!;
+    leave();
+    leave();
+    await tester.pumpAndSettle();
+    expect(find.text('学习入口'), findsOneWidget);
+    expect(await dependencies.repository.history(), hasLength(1));
+    expect(
+      await dependencies.database
+          .select(dependencies.database.memoryStates)
+          .get(),
+      hasLength(1),
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('浏览时队列读取失败，重试后恢复当前新词与进度', (tester) async {
+    await surface(tester);
+    final items = await dependencies.repository.entries(
+      wordbookId: 'cet4',
+      limit: 5,
+    );
+    await dependencies.repository.createWordbook(
+      '读取重试',
+      items.map((item) => item.sense.id).toSet(),
+    );
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await dependencies.repository.setActiveWordbook(book.id);
+    await dependencies.repository.setDailyGoal(5);
+    var calls = 0;
+    var failNext = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: StudyPage(
+          dependencies: dependencies,
+          todayPlan: true,
+          queueStatusLoader: () async {
+            calls++;
+            if (failNext) {
+              failNext = false;
+              throw StateError('temporary queue failure');
+            }
+            return dependencies.repository.queueStatus(todayPlan: true);
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(calls, 1);
+    final next = find.byKey(const ValueKey('new-word-browse-next'));
+    await tester.ensureVisible(next);
+    await tester.tap(next);
+    await tester.pumpAndSettle();
+    expect(find.text('新词先看 2 / 5'), findsOneWidget);
+
+    failNext = true;
+    dependencies.repository.refresh();
+    await tester.pumpAndSettle();
+    expect(calls, 2);
+    expect(find.text('暂时无法读取学习队列'), findsOneWidget);
+
+    await tester.tap(find.text('刷新学习队列'));
+    await tester.pumpAndSettle();
+    expect(calls, 3);
+    expect(find.text('新词先看 2 / 5'), findsOneWidget);
+    expect(find.text(items[1].sense.definition), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
 }

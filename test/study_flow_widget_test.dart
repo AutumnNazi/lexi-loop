@@ -46,6 +46,16 @@ void main() {
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
   }
 
+  Future<void> finishNewWordBrowse(WidgetTester tester) async {
+    final next = find.byKey(const ValueKey('new-word-browse-next'));
+    for (var i = 0; i < 10 && next.evaluate().isNotEmpty; i++) {
+      await tester.ensureVisible(next);
+      await tester.tap(next);
+      await tester.pumpAndSettle();
+    }
+    expect(next, findsNothing);
+  }
+
   testWidgets('首页固定四级词书后保留选择，开始学习和拼写都使用当前词书', (tester) async {
     await surface(tester);
     await dependencies.repository.setDailyGoal(2);
@@ -65,12 +75,17 @@ void main() {
     await tester.tap(find.text('开始学习'));
     await tester.pumpAndSettle();
     expect(find.text('abandon'), findsOneWidget);
+    await finishNewWordBrowse(tester);
     await tester.tap(find.text('回忆 · 揭晓释义'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('Good · 记得'));
     await tester.tap(find.text('Good · 记得'));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('结束本组新词学习？'), findsOneWidget);
+    expect(find.textContaining('1 个词义已保存'), findsOneWidget);
+    await tester.tap(find.text('退出并保留已评'));
     await tester.pumpAndSettle();
     expect(find.text('已学 1 / 3849 个单词'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
@@ -234,13 +249,25 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('只有揭晓后才能评分，评分后自动切到下一个新词', (tester) async {
+  testWidgets('新词浏览完整组后，只有揭晓才能评分并切到下一个测试词', (tester) async {
     await surface(tester);
     await tester.pumpWidget(
       MaterialApp(home: StudyPage(dependencies: dependencies)),
     );
     await tester.pumpAndSettle();
     expect(find.text('bloom'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('new-word-browse-progress')),
+      findsOneWidget,
+    );
+    expect(find.text('新词先看 1 / 5'), findsOneWidget);
+    expect(find.text('开花；绽放'), findsOneWidget);
+    expect(find.text('Good · 记得'), findsNothing);
+    await finishNewWordBrowse(tester);
+    expect(
+      find.byKey(const ValueKey('new-word-test-progress')),
+      findsOneWidget,
+    );
     expect(find.text('开花；绽放'), findsNothing);
     expect(find.text('Good · 记得'), findsNothing);
     await tester.tap(find.text('回忆 · 揭晓释义'));
@@ -329,6 +356,7 @@ void main() {
       MaterialApp(home: StudyPage(dependencies: dependencies)),
     );
     await tester.pumpAndSettle();
+    await finishNewWordBrowse(tester);
     await tester.tap(find.text('回忆 · 揭晓释义'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('Again · 忘记'));
@@ -417,19 +445,30 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('背词页支持 Space 揭晓释义与数字键 3 提交 Good 评分', (tester) async {
+  testWidgets('背词页浏览阶段 Space 前进，测试阶段 Space 揭晓并可用数字键评分', (tester) async {
     await surface(tester, width: 1280, scale: 1.0);
     await tester.pumpWidget(
       MaterialApp(home: StudyPage(dependencies: dependencies)),
     );
     await tester.pumpAndSettle();
     expect(find.text('bloom'), findsOneWidget);
+    expect(find.text('新词先看 1 / 5'), findsOneWidget);
+    expect(find.text('开花；绽放'), findsOneWidget);
+
+    for (var index = 1; index < 5; index++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      await tester.pumpAndSettle();
+      expect(find.text('新词先看 ${index + 1} / 5'), findsOneWidget);
+    }
+    expect(await dependencies.repository.history(), isEmpty);
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pumpAndSettle();
+    expect(find.text('新词测试 1 / 5'), findsOneWidget);
     expect(find.text('开花；绽放'), findsNothing);
 
     await tester.sendKeyEvent(LogicalKeyboardKey.space);
     await tester.pumpAndSettle();
     expect(find.text('开花；绽放'), findsOneWidget);
-
     await tester.sendKeyEvent(LogicalKeyboardKey.digit3);
     await tester.pumpAndSettle();
     expect(find.text('wander'), findsOneWidget);
@@ -492,6 +531,7 @@ void main() {
     await tester.tap(find.text('学习这个词义'));
     await tester.pumpAndSettle();
     expect(find.text('abandon'), findsOneWidget);
+    await finishNewWordBrowse(tester);
     await tester.tap(find.text('回忆 · 揭晓释义'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('Good · 记得'));
@@ -673,6 +713,7 @@ void main() {
     await tester.tap(start);
     await tester.pumpAndSettle();
     expect(find.text('abandon'), findsOneWidget);
+    await finishNewWordBrowse(tester);
     await tester.tap(find.text('回忆 · 揭晓释义'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('Good · 记得'));

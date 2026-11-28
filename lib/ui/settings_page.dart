@@ -529,6 +529,17 @@ class _SettingsPageState extends State<SettingsPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              const SectionHeader(title: '单词读音'),
+              const SizedBox(height: 8),
+              const Text(
+                '使用设备上的英语声音。可以先试听 hello，并选择适合自己的语速；语速会保存。若无法播放，请在系统语音设置中安装英语语音包。',
+              ),
+              const SizedBox(height: 12),
+              WordPronunciationButton(
+                dependencies: widget.dependencies,
+                word: 'hello',
+              ),
+              const SizedBox(height: 24),
               const SectionHeader(title: '关于 Lexi Loop'),
               const SizedBox(height: 10),
               Text(
@@ -538,7 +549,7 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
               const SizedBox(height: 10),
               Text(
-                '包含 4 本离线考试词书及 24 个原创示例词条。词条释义和音标来自 MIT 许可的 ECDICT 数据，不提供例句；考试词表不代表官方年度大纲。无账号、云同步、网络请求或发音功能。',
+                '包含 4 本离线考试词书及 24 个原创示例词条。词条释义和音标来自 MIT 许可的 ECDICT 数据，不提供例句；考试词表不代表官方年度大纲。无账号和云同步；单词读音使用设备上的英语声音。',
                 style: Theme.of(context).textTheme.bodySmall
                     ?.copyWith(color: tokens.inkMuted),
               ),

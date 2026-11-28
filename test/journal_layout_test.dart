@@ -135,6 +135,7 @@ void main() {
       await tester.tap(start);
       await tester.pumpAndSettle();
       await inspect('study');
+      await tester.ensureVisible(find.text('回忆 · 揭晓释义'));
       await tester.tap(find.text('回忆 · 揭晓释义'));
       await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Good · 记得'));
@@ -153,6 +154,13 @@ void main() {
         );
         await tester.pumpAndSettle();
         await inspect(entry.$2);
+        if (entry.$2 == 'settings') {
+          final pronunciation = find.byKey(const ValueKey('pronounce-hello'));
+          await tester.ensureVisible(pronunciation);
+          await tester.pumpAndSettle();
+          expect(pronunciation, findsOneWidget);
+          await inspect('settings-pronunciation');
+        }
         if (entry.$2 == 'library') {
           await tester.tap(find.text('自建词书'));
           await tester.pumpAndSettle();
@@ -372,6 +380,111 @@ void main() {
       await shot(studyKey, 'study-empty-goal-zero');
       await tester.pumpWidget(const SizedBox());
     }, skip: !capture);
+  }
+
+  for (final config in [
+    (320.0, 1.5, false),
+    (390.0, 1.0, true),
+    (1280.0, 1.0, false),
+  ]) {
+    testWidgets('新词先学后测与读音布局 ${config.$1}', (tester) async {
+      tester.view.physicalSize = Size(config.$1, 900);
+      tester.view.devicePixelRatio = 1;
+      tester.platformDispatcher.textScaleFactorTestValue = config.$2;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final deps = AppDependencies(AppDatabase(NativeDatabase.memory()));
+      addTearDown(deps.dispose);
+      const channel = MethodChannel('flutter_tts');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'getVoices') {
+              return [
+                {'name': 'English', 'locale': 'en-US'},
+              ];
+            }
+            return 1;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      await tester.runAsync(() async {
+        await deps.initialize();
+        await deps.repository.setActiveWordbook('everyday');
+        await deps.repository.setDailyGoal(2);
+      });
+      final key = GlobalKey();
+      await tester.pumpWidget(
+        RepaintBoundary(
+          key: key,
+          child: MaterialApp(
+            debugShowCheckedModeBanner: false,
+            locale: const Locale('zh', 'CN'),
+            localizationsDelegates: GlobalMaterialLocalizations.delegates,
+            supportedLocales: const [Locale('zh', 'CN')],
+            theme: journalTheme(
+              config.$3 ? Brightness.dark : Brightness.light,
+              fontFamily: capture ? 'Microsoft YaHei' : null,
+            ),
+            home: StudyPage(dependencies: deps, todayPlan: true),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Future<void> inspect(String state) async {
+        expect(tester.takeException(), isNull);
+        if (!capture) return;
+        await tester.runAsync(() async {
+          final boundary =
+              key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+          final image = await boundary.toImage(pixelRatio: 1);
+          final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+          final dir = Directory('build/learning-pronunciation-review')
+            ..createSync(recursive: true);
+          await File('${dir.path}/${config.$1.toInt()}-$state.png')
+              .writeAsBytes(bytes!.buffer.asUint8List());
+          image.dispose();
+        });
+      }
+
+      expect(find.text('新词先看 1 / 2'), findsOneWidget);
+      await inspect('browse');
+      await tester.ensureVisible(find.text('听读音'));
+      await tester.tap(find.text('听读音'));
+      await tester.pumpAndSettle();
+      expect(find.text('停止'), findsOneWidget);
+      await inspect('pronunciation');
+      await tester.tap(find.text('语速 · 标准'));
+      await tester.pumpAndSettle();
+      await inspect('rate-menu');
+      await tester.tap(find.text('慢速').last);
+      await tester.pumpAndSettle();
+      final next = find.byKey(const ValueKey('new-word-browse-next'));
+      await tester.ensureVisible(next);
+      await inspect('browse-action');
+      await tester.tap(next);
+      await tester.pumpAndSettle();
+      expect(find.text('新词先看 2 / 2'), findsOneWidget);
+      expect(deps.pronunciation.playing, isFalse);
+      await tester.ensureVisible(next);
+      await tester.tap(next);
+      await tester.pumpAndSettle();
+      expect(find.text('新词测试 1 / 2'), findsOneWidget);
+      expect(find.text('开花；逐渐发展成熟'), findsNothing);
+      await tester.ensureVisible(find.text('新词测试 1 / 2'));
+      await inspect('test');
+      final reveal = find.text('回忆 · 揭晓释义');
+      await tester.ensureVisible(reveal);
+      await tester.tap(reveal);
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Good · 记得'));
+      await inspect('rating');
+      expect(await deps.repository.history(), isEmpty);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+    });
   }
 
   testWidgets('四套主题多尺寸截图', (tester) async {

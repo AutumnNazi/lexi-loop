@@ -1369,6 +1369,28 @@ class StudyRepository {
     );
   }
 
+  Future<double> pronunciationRate() async {
+    final setting = await (db.select(
+      db.appSettings,
+    )..where((row) => row.key.equals('pronunciation_rate'))).getSingleOrNull();
+    final value = double.tryParse(setting?.value ?? '');
+    return const [.35, .5, .65].contains(value) ? value! : .5;
+  }
+
+  Future<void> setPronunciationRate(double value) async {
+    if (!const [.35, .5, .65].contains(value)) {
+      throw ArgumentError('请选择慢速、标准或稍快语速。');
+    }
+    await db
+        .into(db.appSettings)
+        .insertOnConflictUpdate(
+          AppSettingsCompanion.insert(
+            key: 'pronunciation_rate',
+            value: '$value',
+          ),
+        );
+  }
+
   Future<void> saveThemeSettings(ThemeSettings settings) async {
     await db.transaction(() async {
       for (final entry in {

@@ -336,6 +336,8 @@ class _WordDetailBodyState extends State<WordDetailBody>
   }
 
   Future<void> _openStudy(int senseId) async {
+    await widget.dependencies.pronunciation.stop();
+    if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) =>
@@ -459,6 +461,11 @@ class _WordDetailBodyState extends State<WordDetailBody>
                             ],
                           ),
                           const SizedBox(height: 16),
+                          WordPronunciationButton(
+                            dependencies: widget.dependencies,
+                            word: item.word.spelling,
+                          ),
+                          const SizedBox(height: 12),
                           Container(
                             padding: const EdgeInsets.symmetric(
                               horizontal: 14,

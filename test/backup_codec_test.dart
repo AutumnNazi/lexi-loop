@@ -109,6 +109,19 @@ void main() {
     expect(await codec.export(), before);
   });
 
+  test('非法读音语速在预检与恢复阶段均拒绝，不覆盖当前数据', () async {
+    final before = await codec.export();
+    final root = jsonDecode(before) as Map<String, dynamic>;
+    (root['appSettings'] as List).add({
+      'key': 'pronunciation_rate',
+      'value': 'NaN',
+    });
+    final invalid = jsonEncode(root);
+    await expectLater(codec.preview(invalid), throwsFormatException);
+    await expectLater(codec.restore(invalid), throwsFormatException);
+    expect(await codec.export(), before);
+  });
+
   test('多步评分历史可以恢复，丢失中间历史则拒绝', () async {
     var instant = now;
     final engine = FsrsEngine();

@@ -1,6 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 
 import 'core/clock.dart';
+import 'core/pronunciation.dart';
 import 'core/theme_settings.dart';
 import 'data/app_database.dart';
 import 'data/backup_codec.dart';
@@ -27,6 +28,10 @@ class AppDependencies {
         onRestored: repository.invalidateUndoEligibility,
       ),
       ThemeController(repository),
+      PronunciationController(
+        loadRate: repository.pronunciationRate,
+        saveRate: repository.setPronunciationRate,
+      ),
       nowUtc,
     );
   }
@@ -36,6 +41,7 @@ class AppDependencies {
     this.repository,
     this.backup,
     this.theme,
+    this.pronunciation,
     this.nowUtc,
   );
   final AppDatabase database;
@@ -43,6 +49,7 @@ class AppDependencies {
   final StudyRepository repository;
   final BackupCodec backup;
   final ThemeController theme;
+  final PronunciationController pronunciation;
   final UtcClock nowUtc;
 
   Future<void> initialize() async {
@@ -51,11 +58,18 @@ class AppDependencies {
       configurationJson: engine.configurationJson,
     );
     await theme.load();
+    await pronunciation.reloadSettings();
   }
 
-  Future<void> reloadTheme() => theme.load();
+  Future<void> reloadTheme() async {
+    await pronunciation.stop();
+    await theme.load();
+    await pronunciation.reloadSettings();
+  }
 
   Future<void> dispose() async {
+    await pronunciation.stop();
+    pronunciation.dispose();
     theme.dispose();
     await repository.dispose();
     await database.close();

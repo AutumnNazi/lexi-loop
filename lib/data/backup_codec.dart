@@ -285,6 +285,15 @@ class BackupCodec {
     );
     final goal = int.tryParse(settings['daily_new_goal'] ?? '');
     require(
+      !settings.containsKey('pronunciation_rate') ||
+          const [
+            .35,
+            .5,
+            .65,
+          ].contains(double.tryParse(settings['pronunciation_rate']!)),
+      '备份中的读音语速无效。',
+    );
+    require(
       goal != null &&
           goal >= 0 &&
           goal <= 100 &&

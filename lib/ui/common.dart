@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:material_ui/material_ui.dart';
 
+import '../app.dart';
 import '../data/app_database.dart';
 import 'journal_style.dart';
 
@@ -259,6 +262,165 @@ class DialogResponse<T> {
     }
     _responded = true;
     Navigator.of(context).pop(result);
+  }
+}
+
+class WordPronunciationButton extends StatefulWidget {
+  const WordPronunciationButton({
+    super.key,
+    required this.dependencies,
+    required this.word,
+    this.enabled = true,
+  });
+  final AppDependencies dependencies;
+  final String word;
+  final bool enabled;
+
+  @override
+  State<WordPronunciationButton> createState() =>
+      _WordPronunciationButtonState();
+}
+
+class _WordPronunciationButtonState extends State<WordPronunciationButton>
+    with WidgetsBindingObserver {
+  final _owner = Object();
+  bool _played = false;
+  bool _savingRate = false;
+  String? _rateError;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didUpdateWidget(covariant WordPronunciationButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.word != widget.word ||
+        oldWidget.dependencies != widget.dependencies ||
+        !widget.enabled) {
+      unawaited(oldWidget.dependencies.pronunciation.stop(owner: _owner));
+      _played = false;
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      unawaited(widget.dependencies.pronunciation.stop(owner: _owner));
+    }
+  }
+
+  @override
+  void deactivate() {
+    unawaited(widget.dependencies.pronunciation.stop(owner: _owner));
+    super.deactivate();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _play() async {
+    if (!widget.enabled || _savingRate) return;
+    setState(() => _played = true);
+    await widget.dependencies.pronunciation.play(widget.word, owner: _owner);
+  }
+
+  Future<void> _changeRate(double value) async {
+    if (_savingRate || !widget.enabled) return;
+    setState(() {
+      _savingRate = true;
+      _rateError = null;
+    });
+    try {
+      await widget.dependencies.pronunciation.stop();
+      await widget.dependencies.pronunciation.changeRate(value);
+    } catch (_) {
+      if (mounted) setState(() => _rateError = '语速未能保存，请重试。');
+    } finally {
+      if (mounted) setState(() => _savingRate = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final speech = widget.dependencies.pronunciation;
+    return ListenableBuilder(
+      listenable: speech,
+      builder: (context, _) {
+        final active = identical(speech.owner, _owner);
+        final starting = active && speech.starting;
+        final error = _rateError ?? (active ? speech.error : null);
+        final rateLabel = speech.rate == .35
+            ? '慢速'
+            : speech.rate == .65
+            ? '稍快'
+            : '标准';
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              alignment: WrapAlignment.center,
+              children: [
+                OutlinedButton(
+                  key: ValueKey('pronounce-${widget.word}'),
+                  onPressed: !widget.enabled || _savingRate || starting
+                      ? null
+                      : _play,
+                  child: Text(
+                    starting
+                        ? '准备读音…'
+                        : _played
+                        ? '再听一次'
+                        : '听读音',
+                  ),
+                ),
+                if (active && (speech.playing || speech.starting))
+                  TextButton(
+                    onPressed: () => speech.stop(owner: _owner),
+                    child: const Text('停止'),
+                  ),
+                PopupMenuButton<double>(
+                  tooltip: '调整读音语速',
+                  enabled: widget.enabled && !_savingRate && !starting,
+                  initialValue: speech.rate,
+                  onSelected: _changeRate,
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: .35, child: Text('慢速')),
+                    PopupMenuItem(value: .5, child: Text('标准')),
+                    PopupMenuItem(value: .65, child: Text('稍快')),
+                  ],
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 14,
+                    ),
+                    child: Text('语速 · $rateLabel'),
+                  ),
+                ),
+              ],
+            ),
+            if (error != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                error,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: JournalTokens.of(context).again.foreground,
+                ),
+              ),
+            ],
+          ],
+        );
+      },
+    );
   }
 }
 
