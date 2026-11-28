@@ -745,6 +745,8 @@ class _WordbookEditorPageState extends State<WordbookEditorPage> {
   late final TextEditingController _name;
   final _search = TextEditingController();
   final _selected = <int, StudyItem>{};
+  final _initialSelectedIds = <int>{};
+  late String _initialName;
   String? _bookId;
   bool _selectedOnly = false;
   int _offset = 0;
@@ -755,14 +757,31 @@ class _WordbookEditorPageState extends State<WordbookEditorPage> {
   bool _preparing = false;
   bool _selectionReady = true;
   String? _error;
+  bool _exitDialogOpen = false;
+  bool _allowExit = false;
+  bool _routePopped = false;
 
   bool get _editing => widget.book != null;
-  bool get _canSelect => !_busy && !_preparing && _selectionReady;
+  bool get _canSelect =>
+      !_busy &&
+      !_preparing &&
+      _selectionReady &&
+      !_exitDialogOpen &&
+      !_allowExit;
+  bool get _dirty {
+    final nameDirty = _name.text != _initialName;
+    if (_editing && !_selectionReady) return nameDirty;
+    return nameDirty || !_sameIds(_selected.keys.toSet(), _initialSelectedIds);
+  }
+
+  bool _sameIds(Set<int> left, Set<int> right) =>
+      left.length == right.length && left.containsAll(right);
 
   @override
   void initState() {
     super.initState();
     _name = TextEditingController(text: widget.book?.name ?? '');
+    _initialName = widget.book?.name ?? '';
     _preparing = _editing;
     _selectionReady = !_editing;
     _items = _load();
@@ -788,6 +807,10 @@ class _WordbookEditorPageState extends State<WordbookEditorPage> {
         _selected
           ..clear()
           ..addEntries(items.map((item) => MapEntry(item.sense.id, item)));
+        _initialSelectedIds
+          ..clear()
+          ..addAll(_selected.keys);
+        _initialName = widget.book!.name;
         _preparing = false;
         _selectionReady = true;
         _items = _load();
@@ -846,7 +869,46 @@ class _WordbookEditorPageState extends State<WordbookEditorPage> {
     super.dispose();
   }
 
+  void _exitPage() {
+    if (!mounted || _allowExit) return;
+    setState(() => _allowExit = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_routePopped) Navigator.of(context).maybePop();
+    });
+  }
+
+  Future<void> _handleBack() async {
+    if (_exitDialogOpen || _allowExit) return;
+    if (_busy) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('正在保存，请稍候…')));
+      return;
+    }
+    if (!_dirty) {
+      _exitPage();
+      return;
+    }
+    _exitDialogOpen = true;
+    final discard = await confirmDiscardChanges(
+      context,
+      title: '放弃未保存的修改？',
+      message: '继续编辑会保留当前名称和选词；放弃并返回后本次修改不会保存。',
+    );
+    _exitDialogOpen = false;
+    if (mounted) setState(() {});
+    if (discard && mounted) _exitPage();
+  }
+
   Future<void> _save() async {
+    if (_busy ||
+        _preparing ||
+        !_selectionReady ||
+        _exitDialogOpen ||
+        _allowExit) {
+      return;
+    }
+    final name = _name.text;
+    final senseIds = _selected.keys.toSet();
     setState(() {
       _busy = true;
       _error = null;
@@ -855,16 +917,17 @@ class _WordbookEditorPageState extends State<WordbookEditorPage> {
       if (_editing) {
         await widget.dependencies.repository.updateWordbook(
           widget.book!.id,
-          _name.text,
-          _selected.keys.toSet(),
+          name,
+          senseIds,
         );
       } else {
-        await widget.dependencies.repository.createWordbook(
-          _name.text,
-          _selected.keys.toSet(),
-        );
+        await widget.dependencies.repository.createWordbook(name, senseIds);
       }
-      if (mounted) Navigator.of(context).pop();
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+      });
+      _exitPage();
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -879,292 +942,405 @@ class _WordbookEditorPageState extends State<WordbookEditorPage> {
   Widget build(BuildContext context) {
     final tokens = JournalTokens.of(context);
     final width = MediaQuery.sizeOf(context).width;
-    return Scaffold(
-      appBar: AppBar(
-        leading: journalBackButton(context),
-        title: Text(_editing ? '编辑词书' : '自建词书'),
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: SingleChildScrollView(
+    return PopScope(
+      canPop: _allowExit,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) {
+          _routePopped = true;
+          return;
+        }
+        _handleBack();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          leading: journalBackButton(context),
+          title: Text(_editing ? '编辑词书' : '自建词书'),
+        ),
+        body: SafeArea(
+          child: Column(
+            children: [
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.fromLTRB(
+                    width < 600 ? 18 : 36,
+                    12,
+                    width < 600 ? 18 : 36,
+                    24,
+                  ),
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 720),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            _editing ? '调整这本词书' : '把想学的词放在一起',
+                            style: Theme.of(context).textTheme.headlineMedium,
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            _editing
+                                ? '可以改名，也可以继续从词书中增删词义；学习进度会继续共享。'
+                                : '从内置词义中选择；已有学习进度会自动共享。',
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(color: tokens.inkSecondary),
+                          ),
+                          const SizedBox(height: 20),
+                          TextField(
+                            key: const ValueKey('wordbook-name'),
+                            controller: _name,
+                            enabled: !_busy && !_preparing,
+                            maxLength: 40,
+                            decoration: const InputDecoration(
+                              labelText: '词书名称',
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              ChoiceChip(
+                                label: const Text('查找词义'),
+                                selected: !_selectedOnly,
+                                onSelected:
+                                    _busy || _preparing || !_selectionReady
+                                    ? null
+                                    : (_) => setState(() {
+                                        _selectedOnly = false;
+                                        _reload();
+                                      }),
+                              ),
+                              ChoiceChip(
+                                key: const ValueKey('wordbook-selected-only'),
+                                label: Text('已选词义（${_selected.length}）'),
+                                selected: _selectedOnly,
+                                onSelected:
+                                    _busy || _preparing || !_selectionReady
+                                    ? null
+                                    : (_) => setState(() {
+                                        _selectedOnly = true;
+                                        _reload();
+                                      }),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          if (!_selectedOnly) ...[
+                            AsyncContent(
+                              future: _books,
+                              builder: (books) =>
+                                  DropdownButtonFormField<String>(
+                                    key: const ValueKey('wordbook-source'),
+                                    initialValue: _bookId ?? '',
+                                    isExpanded: true,
+                                    icon: const RotatedBox(
+                                      quarterTurns: 1,
+                                      child: JournalIcon(
+                                        Icons.chevron_right,
+                                        size: 20,
+                                      ),
+                                    ),
+                                    decoration: const InputDecoration(
+                                      labelText: '从哪本词书选词',
+                                    ),
+                                    items: [
+                                      const DropdownMenuItem(
+                                        value: '',
+                                        child: Text('全部词书'),
+                                      ),
+                                      ...books.map(
+                                        (book) => DropdownMenuItem(
+                                          value: book.id,
+                                          child: Text(
+                                            book.name,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                    onChanged: _canSelect
+                                        ? (value) => setState(() {
+                                            _bookId = value == ''
+                                                ? null
+                                                : value;
+                                            _reload();
+                                          })
+                                        : null,
+                                  ),
+                            ),
+                            const SizedBox(height: 12),
+                            TextField(
+                              key: const ValueKey('wordbook-search'),
+                              controller: _search,
+                              enabled: _canSelect,
+                              decoration: InputDecoration(
+                                labelText: '搜索单词或释义',
+                                prefixIcon: const Padding(
+                                  padding: EdgeInsets.all(14),
+                                  child: JournalIcon(Icons.search, size: 20),
+                                ),
+                                suffixIcon: _search.text.isEmpty
+                                    ? null
+                                    : IconButton(
+                                        tooltip: '清除搜索',
+                                        onPressed: _canSelect
+                                            ? () => setState(() {
+                                                _search.clear();
+                                                _reload();
+                                              })
+                                            : null,
+                                        icon: const JournalIcon(
+                                          Icons.close,
+                                          size: 18,
+                                        ),
+                                      ),
+                              ),
+                              onChanged: (_) => setState(_reload),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              '切换搜索、词书或页码，已勾选的词义都会保留。',
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(color: tokens.inkSecondary),
+                            ),
+                          ] else
+                            Text(
+                              '这里展示全部已选词义，可以取消勾选。',
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(color: tokens.inkSecondary),
+                            ),
+                          const SizedBox(height: 16),
+                          AsyncContent(
+                            key: ObjectKey(_items),
+                            future: _items,
+                            retry: () =>
+                                setState(() => _reload(resetPage: false)),
+                            builder: (data) => JournalSurface(
+                              padding: EdgeInsets.zero,
+                              child: Material(
+                                color: Colors.transparent,
+                                child: Column(
+                                  children: [
+                                    Padding(
+                                      padding: const EdgeInsets.all(16),
+                                      child: Wrap(
+                                        spacing: 16,
+                                        runSpacing: 8,
+                                        children: [
+                                          Text('已选 ${_selected.length} 个词义'),
+                                          Text(
+                                            data.total == 0
+                                                ? '0 个结果'
+                                                : '${_offset + 1}–${_offset + data.items.length} / ${data.total}',
+                                          ),
+                                          TextButton(
+                                            key: const ValueKey(
+                                              'wordbook-select-page',
+                                            ),
+                                            onPressed:
+                                                _canSelect &&
+                                                    data.items.isNotEmpty
+                                                ? () => setState(() {
+                                                    for (final item
+                                                        in data.items) {
+                                                      _selected[item.sense.id] =
+                                                          item;
+                                                    }
+                                                    if (_selectedOnly) {
+                                                      _reload(resetPage: false);
+                                                    }
+                                                  })
+                                                : null,
+                                            child: const Text('全选本页'),
+                                          ),
+                                          TextButton(
+                                            key: const ValueKey(
+                                              'wordbook-clear-page',
+                                            ),
+                                            onPressed:
+                                                _canSelect &&
+                                                    data.items.isNotEmpty
+                                                ? () => setState(() {
+                                                    for (final item
+                                                        in data.items) {
+                                                      _selected.remove(
+                                                        item.sense.id,
+                                                      );
+                                                    }
+                                                    if (_selectedOnly) {
+                                                      _reload(resetPage: false);
+                                                    }
+                                                  })
+                                                : null,
+                                            child: const Text('取消本页'),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    if (data.items.isEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.fromLTRB(
+                                          16,
+                                          8,
+                                          16,
+                                          24,
+                                        ),
+                                        child: Text(
+                                          _selectedOnly
+                                              ? '还没有选择词义，去“查找词义”中添加。'
+                                              : '没有找到匹配的词义，试试其他单词、中文释义或词书。',
+                                        ),
+                                      ),
+                                    ...List.generate(data.items.length, (i) {
+                                      final item = data.items[i];
+                                      return Column(
+                                        children: [
+                                          CheckboxListTile(
+                                            contentPadding:
+                                                const EdgeInsets.symmetric(
+                                                  horizontal: 14,
+                                                  vertical: 4,
+                                                ),
+                                            title: Text(
+                                              item.word.spelling,
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .titleMedium
+                                                  ?.copyWith(
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                            ),
+                                            subtitle: Text(
+                                              _preview(
+                                                item.sense.definition,
+                                                120,
+                                              ),
+                                            ),
+                                            value: _selected.containsKey(
+                                              item.sense.id,
+                                            ),
+                                            onChanged: _canSelect
+                                                ? (checked) => setState(() {
+                                                    if (checked == true) {
+                                                      _selected[item.sense.id] =
+                                                          item;
+                                                    } else {
+                                                      _selected.remove(
+                                                        item.sense.id,
+                                                      );
+                                                    }
+                                                    if (_selectedOnly) {
+                                                      _reload(resetPage: false);
+                                                    }
+                                                  })
+                                                : null,
+                                          ),
+                                          if (i + 1 < data.items.length)
+                                            Divider(
+                                              height: 1,
+                                              color: tokens.border,
+                                            ),
+                                        ],
+                                      );
+                                    }),
+                                    if (_offset > 0 ||
+                                        _offset + data.items.length <
+                                            data.total)
+                                      Padding(
+                                        padding: const EdgeInsets.all(12),
+                                        child: Wrap(
+                                          spacing: 12,
+                                          children: [
+                                            if (_offset > 0)
+                                              TextButton(
+                                                onPressed: _canSelect
+                                                    ? () => setState(() {
+                                                        _offset =
+                                                            (_offset -
+                                                                    _pageSize)
+                                                                .clamp(
+                                                                  0,
+                                                                  1 << 30,
+                                                                );
+                                                        _reload(
+                                                          resetPage: false,
+                                                        );
+                                                      })
+                                                    : null,
+                                                child: const Text('上一页'),
+                                              ),
+                                            if (_offset + data.items.length <
+                                                data.total)
+                                              TextButton(
+                                                onPressed: _canSelect
+                                                    ? () => setState(() {
+                                                        _offset += _pageSize;
+                                                        _reload(
+                                                          resetPage: false,
+                                                        );
+                                                      })
+                                                    : null,
+                                                child: const Text('下一页'),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              Container(
+                decoration: BoxDecoration(
+                  color: tokens.surface,
+                  border: Border(top: BorderSide(color: tokens.border)),
+                ),
                 padding: EdgeInsets.fromLTRB(
                   width < 600 ? 18 : 36,
-                  12,
+                  14,
                   width < 600 ? 18 : 36,
-                  24,
+                  16,
                 ),
                 child: Center(
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 720),
                     child: Column(
+                      mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Text(
-                          _editing ? '调整这本词书' : '把想学的词放在一起',
-                          style: Theme.of(context).textTheme.headlineMedium,
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          _editing
-                              ? '可以改名，也可以继续从词书中增删词义；学习进度会继续共享。'
-                              : '从内置词义中选择；已有学习进度会自动共享。',
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(color: tokens.inkSecondary),
-                        ),
-                        const SizedBox(height: 20),
-                        TextField(
-                          key: const ValueKey('wordbook-name'),
-                          controller: _name,
-                          enabled: !_busy && !_preparing,
-                          maxLength: 40,
-                          decoration: const InputDecoration(labelText: '词书名称'),
-                        ),
-                        const SizedBox(height: 12),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            ChoiceChip(
-                              label: const Text('查找词义'),
-                              selected: !_selectedOnly,
-                              onSelected:
-                                  _busy || _preparing || !_selectionReady
-                                  ? null
-                                  : (_) => setState(() {
-                                      _selectedOnly = false;
-                                      _reload();
-                                    }),
-                            ),
-                            ChoiceChip(
-                              key: const ValueKey('wordbook-selected-only'),
-                              label: Text('已选词义（${_selected.length}）'),
-                              selected: _selectedOnly,
-                              onSelected:
-                                  _busy || _preparing || !_selectionReady
-                                  ? null
-                                  : (_) => setState(() {
-                                      _selectedOnly = true;
-                                      _reload();
-                                    }),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-                        if (!_selectedOnly) ...[
-                          AsyncContent(
-                            future: _books,
-                            builder: (books) => DropdownButtonFormField<String>(
-                              key: const ValueKey('wordbook-source'),
-                              initialValue: _bookId ?? '',
-                              isExpanded: true,
-                              icon: const RotatedBox(
-                                quarterTurns: 1,
-                                child: JournalIcon(
-                                  Icons.chevron_right,
-                                  size: 20,
-                                ),
-                              ),
-                              decoration: const InputDecoration(
-                                labelText: '从哪本词书选词',
-                              ),
-                              items: [
-                                const DropdownMenuItem(
-                                  value: '',
-                                  child: Text('全部词书'),
-                                ),
-                                ...books.map(
-                                  (book) => DropdownMenuItem(
-                                    value: book.id,
-                                    child: Text(
-                                      book.name,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                              onChanged: _canSelect
-                                  ? (value) => setState(() {
-                                      _bookId = value == '' ? null : value;
-                                      _reload();
-                                    })
-                                  : null,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          TextField(
-                            key: const ValueKey('wordbook-search'),
-                            controller: _search,
-                            enabled: _canSelect,
-                            decoration: InputDecoration(
-                              labelText: '搜索单词或释义',
-                              prefixIcon: const Padding(
-                                padding: EdgeInsets.all(14),
-                                child: JournalIcon(Icons.search, size: 20),
-                              ),
-                              suffixIcon: _search.text.isEmpty
-                                  ? null
-                                  : IconButton(
-                                      tooltip: '清除搜索',
-                                      onPressed: _canSelect
-                                          ? () => setState(() {
-                                              _search.clear();
-                                              _reload();
-                                            })
-                                          : null,
-                                      icon: const JournalIcon(
-                                        Icons.close,
-                                        size: 18,
-                                      ),
-                                    ),
-                            ),
-                            onChanged: (_) => setState(_reload),
-                          ),
-                          const SizedBox(height: 8),
+                        if (_error != null) ...[
                           Text(
-                            '切换搜索、词书或页码，已勾选的词义都会保留。',
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: tokens.inkSecondary),
+                            _error!,
+                            style: TextStyle(color: tokens.again.foreground),
                           ),
-                        ] else
-                          Text(
-                            '这里展示全部已选词义，可以取消勾选。',
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: tokens.inkSecondary),
+                          const SizedBox(height: 10),
+                        ],
+                        if (_editing && !_selectionReady && !_preparing) ...[
+                          TextButton(
+                            onPressed: _prepareExistingSelection,
+                            child: const Text('重新读取词书内容'),
                           ),
-                        const SizedBox(height: 16),
-                        AsyncContent(
-                          key: ObjectKey(_items),
-                          future: _items,
-                          retry: () =>
-                              setState(() => _reload(resetPage: false)),
-                          builder: (data) => JournalSurface(
-                            padding: EdgeInsets.zero,
-                            child: Material(
-                              color: Colors.transparent,
-                              child: Column(
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.all(16),
-                                    child: Wrap(
-                                      spacing: 16,
-                                      runSpacing: 8,
-                                      children: [
-                                        Text('已选 ${_selected.length} 个词义'),
-                                        Text(
-                                          data.total == 0
-                                              ? '0 个结果'
-                                              : '${_offset + 1}–${_offset + data.items.length} / ${data.total}',
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  if (data.items.isEmpty)
-                                    Padding(
-                                      padding: const EdgeInsets.fromLTRB(
-                                        16,
-                                        8,
-                                        16,
-                                        24,
-                                      ),
-                                      child: Text(
-                                        _selectedOnly
-                                            ? '还没有选择词义，去“查找词义”中添加。'
-                                            : '没有找到匹配的词义，试试其他单词、中文释义或词书。',
-                                      ),
-                                    ),
-                                  ...List.generate(data.items.length, (i) {
-                                    final item = data.items[i];
-                                    return Column(
-                                      children: [
-                                        CheckboxListTile(
-                                          contentPadding:
-                                              const EdgeInsets.symmetric(
-                                                horizontal: 14,
-                                                vertical: 4,
-                                              ),
-                                          title: Text(
-                                            item.word.spelling,
-                                            style: Theme.of(context)
-                                                .textTheme
-                                                .titleMedium
-                                                ?.copyWith(
-                                                  fontWeight: FontWeight.w600,
-                                                ),
-                                          ),
-                                          subtitle: Text(
-                                            _preview(
-                                              item.sense.definition,
-                                              120,
-                                            ),
-                                          ),
-                                          value: _selected.containsKey(
-                                            item.sense.id,
-                                          ),
-                                          onChanged: _canSelect
-                                              ? (checked) => setState(() {
-                                                  if (checked == true) {
-                                                    _selected[item.sense.id] =
-                                                        item;
-                                                  } else {
-                                                    _selected.remove(
-                                                      item.sense.id,
-                                                    );
-                                                  }
-                                                  if (_selectedOnly) {
-                                                    _reload(resetPage: false);
-                                                  }
-                                                })
-                                              : null,
-                                        ),
-                                        if (i + 1 < data.items.length)
-                                          Divider(
-                                            height: 1,
-                                            color: tokens.border,
-                                          ),
-                                      ],
-                                    );
-                                  }),
-                                  if (_offset > 0 ||
-                                      _offset + data.items.length < data.total)
-                                    Padding(
-                                      padding: const EdgeInsets.all(12),
-                                      child: Wrap(
-                                        spacing: 12,
-                                        children: [
-                                          if (_offset > 0)
-                                            TextButton(
-                                              onPressed: _canSelect
-                                                  ? () => setState(() {
-                                                      _offset =
-                                                          (_offset - _pageSize)
-                                                              .clamp(
-                                                                0,
-                                                                1 << 30,
-                                                              );
-                                                      _reload(resetPage: false);
-                                                    })
-                                                  : null,
-                                              child: const Text('上一页'),
-                                            ),
-                                          if (_offset + data.items.length <
-                                              data.total)
-                                            TextButton(
-                                              onPressed: _canSelect
-                                                  ? () => setState(() {
-                                                      _offset += _pageSize;
-                                                      _reload(resetPage: false);
-                                                    })
-                                                  : null,
-                                              child: const Text('下一页'),
-                                            ),
-                                        ],
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
+                          const SizedBox(height: 10),
+                        ],
+                        FilledButton(
+                          onPressed: _busy || _preparing || !_selectionReady
+                              ? null
+                              : _save,
+                          child: Text(
+                            _busy
+                                ? '正在保存…'
+                                : _preparing
+                                ? '正在读取词书…'
+                                : _editing
+                                ? '保存修改（${_selected.length} 个词义）'
+                                : '创建词书（${_selected.length} 个词义）',
                           ),
                         ),
                       ],
@@ -1172,59 +1348,8 @@ class _WordbookEditorPageState extends State<WordbookEditorPage> {
                   ),
                 ),
               ),
-            ),
-            Container(
-              decoration: BoxDecoration(
-                color: tokens.surface,
-                border: Border(top: BorderSide(color: tokens.border)),
-              ),
-              padding: EdgeInsets.fromLTRB(
-                width < 600 ? 18 : 36,
-                14,
-                width < 600 ? 18 : 36,
-                16,
-              ),
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 720),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (_error != null) ...[
-                        Text(
-                          _error!,
-                          style: TextStyle(color: tokens.again.foreground),
-                        ),
-                        const SizedBox(height: 10),
-                      ],
-                      if (_editing && !_selectionReady && !_preparing) ...[
-                        TextButton(
-                          onPressed: _prepareExistingSelection,
-                          child: const Text('重新读取词书内容'),
-                        ),
-                        const SizedBox(height: 10),
-                      ],
-                      FilledButton(
-                        onPressed: _busy || _preparing || !_selectionReady
-                            ? null
-                            : _save,
-                        child: Text(
-                          _busy
-                              ? '正在保存…'
-                              : _preparing
-                              ? '正在读取词书…'
-                              : _editing
-                              ? '保存修改（${_selected.length} 个词义）'
-                              : '创建词书（${_selected.length} 个词义）',
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

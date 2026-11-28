@@ -239,3 +239,56 @@ String localDateTimeLabel(DateTime value) {
   String two(int number) => number.toString().padLeft(2, '0');
   return '${date.month} 月 ${date.day} 日 ${two(date.hour)}:${two(date.minute)}';
 }
+
+String localDateTimeWithYearLabel(DateTime value) {
+  final date = value.toLocal();
+  String two(int number) => number.toString().padLeft(2, '0');
+  return '${date.year}-${two(date.month)}-${two(date.day)} '
+      '${two(date.hour)}:${two(date.minute)}';
+}
+
+class DialogResponse<T> {
+  bool _responded = false;
+
+  void close(BuildContext context, T result) {
+    // 同帧重复点击或已关闭弹框的旧回调，不能继续退出外层页面。
+    if (_responded ||
+        !context.mounted ||
+        ModalRoute.of(context)?.isCurrent != true) {
+      return;
+    }
+    _responded = true;
+    Navigator.of(context).pop(result);
+  }
+}
+
+Future<bool> confirmDiscardChanges(
+  BuildContext context, {
+  required String title,
+  required String message,
+  String keepLabel = '继续编辑',
+  String discardLabel = '放弃并返回',
+}) async {
+  final response = DialogResponse<bool>();
+  final discard = await showDialog<bool>(
+    context: context,
+    builder: (context) {
+      return AlertDialog(
+        constraints: const BoxConstraints(maxWidth: 440),
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => response.close(context, false),
+            child: Text(keepLabel),
+          ),
+          FilledButton(
+            onPressed: () => response.close(context, true),
+            child: Text(discardLabel),
+          ),
+        ],
+      );
+    },
+  );
+  return discard == true;
+}

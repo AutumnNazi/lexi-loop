@@ -12,12 +12,13 @@ import 'package:lexi_loop/domain/fsrs_engine.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late AppDatabase db;
+  late FsrsEngine engine;
   late StudyRepository repository;
   late BackupCodec codec;
   final now = DateTime.utc(2026, 11, 27, 8, 0, 0, 0, 123);
   setUp(() async {
     db = AppDatabase(NativeDatabase.memory());
-    final engine = FsrsEngine();
+    engine = FsrsEngine();
     repository = StudyRepository(db, engine, nowUtc: () => now);
     codec = BackupCodec(db, engine, nowUtc: () => now);
     await db.ensureSeeded(
@@ -44,6 +45,68 @@ void main() {
     );
     await expectLater(codec.restore(backup), throwsA(isA<Exception>()));
     expect(await codec.export(), original);
+  });
+
+  test('备份预检返回已校验摘要，且不写库、不触发恢复回调', () async {
+    var restored = 0;
+    final previewCodec = BackupCodec(
+      db,
+      engine,
+      nowUtc: () => now,
+      onRestored: () => restored++,
+    );
+    final source = await previewCodec.export();
+    final before = await previewCodec.export();
+    final root = jsonDecode(source) as Map<String, dynamic>;
+    final preview = await previewCodec.preview(source);
+    expect(
+      preview.exportedAt.millisecondsSinceEpoch,
+      now.millisecondsSinceEpoch,
+    );
+    expect(preview.wordbookCount, (root['wordbooks'] as List).length);
+    expect(preview.senseCount, (root['wordSenses'] as List).length);
+    expect(preview.learnedSenseCount, 0);
+    expect(preview.reviewEventCount, 0);
+    expect(preview.dailyGoal, 10);
+    expect(restored, 0);
+    expect(await previewCodec.export(), before);
+
+    final item = (await repository.queue()).first;
+    await repository.setDailyGoal(3);
+    await repository.score(item, fsrs.Rating.good, eventId: newReviewEventId());
+    final changed = await previewCodec.export();
+    final changedPreview = await previewCodec.preview(changed);
+    expect(changedPreview.learnedSenseCount, 1);
+    expect(changedPreview.reviewEventCount, 1);
+    expect(changedPreview.dailyGoal, 3);
+    expect(restored, 0);
+    expect(await previewCodec.export(), changed);
+  });
+
+  test('备份预检不使现有撤销资格失效', () async {
+    final item = (await repository.queue()).first;
+    final eventId = newReviewEventId();
+    await repository.score(item, fsrs.Rating.good, eventId: eventId);
+    final previewCodec = BackupCodec(
+      db,
+      engine,
+      nowUtc: () => now,
+      onRestored: repository.invalidateUndoEligibility,
+    );
+    await previewCodec.preview(await previewCodec.export());
+    expect(await repository.history(), hasLength(1));
+    final result = await repository.undoLastReview(eventId);
+    expect(result.firstLearning, isTrue);
+    expect(await repository.history(), isEmpty);
+  });
+
+  test('备份预检拒绝损坏文件且不改库', () async {
+    final before = await codec.export();
+    await expectLater(
+      codec.preview('{"format":"lexi_loop_backup","schemaVersion":1}'),
+      throwsFormatException,
+    );
+    expect(await codec.export(), before);
   });
 
   test('多步评分历史可以恢复，丢失中间历史则拒绝', () async {

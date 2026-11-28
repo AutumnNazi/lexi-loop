@@ -53,6 +53,29 @@ class StudyStats {
   final List<int> dailyCounts;
 }
 
+class ReviewActivityDay {
+  const ReviewActivityDay({required this.localDate, required this.count});
+  final DateTime localDate;
+  final int count;
+}
+
+class ReviewActivity {
+  const ReviewActivity({
+    required this.days,
+    required this.dayCounts,
+    required this.ratingCount,
+    required this.goodEasyCount,
+  });
+  final int days;
+  final List<ReviewActivityDay> dayCounts;
+  final int ratingCount;
+  final int goodEasyCount;
+
+  int get activeDays => dayCounts.where((day) => day.count > 0).length;
+  double? get successRate =>
+      ratingCount == 0 ? null : goodEasyCount / ratingCount;
+}
+
 class StudyQueueStatus {
   const StudyQueueStatus({
     required this.items,
@@ -149,7 +172,10 @@ class StudyRepository {
     _undoEventId = null;
   }
 
-  Future<List<ReviewEvent>> history({int? senseId}) {
+  Future<List<ReviewEvent>> history({int? senseId, int? limit}) async {
+    if (limit != null && limit < 0) {
+      throw ArgumentError('历史记录数量不能为负数。');
+    }
     final query = db.select(db.reviewEvents)
       ..where(
         (row) =>
@@ -157,6 +183,16 @@ class StudyRepository {
             row.trainingMode.equals(recognitionMode),
       );
     if (senseId != null) query.where((row) => row.wordSenseId.equals(senseId));
+    if (limit != null) {
+      query
+        ..orderBy([
+          (row) => OrderingTerm.desc(row.reviewedAt),
+          (row) => OrderingTerm.desc(row.id),
+        ])
+        ..limit(limit);
+      final latest = await query.get();
+      return latest.reversed.toList();
+    }
     query.orderBy([
       (row) => OrderingTerm.asc(row.reviewedAt),
       (row) => OrderingTerm.asc(row.id),
@@ -165,53 +201,172 @@ class StudyRepository {
   }
 
   Future<StudyStats> stats({DateTime? asOf}) async {
-    final events = await history();
-    final wordCounts = await wordProgress();
     final now = asOf ?? nowUtc();
-    final today = calendar.dayKey(now);
-    final dates = events
-        .map(
-          (event) => DateTime.fromMillisecondsSinceEpoch(
-            event.reviewedAt,
-            isUtc: true,
-          ),
-        )
-        .toList();
-    final counts = List<int>.filled(7, 0);
-    for (final date in dates) {
-      final offset = calendar.dayKey(date) - (today - 6);
-      if (offset >= 0 && offset < 7) counts[offset]++;
-    }
-    double success(Iterable<ReviewEvent> list) {
-      final values = list.toList();
-      return values.isEmpty
-          ? 0
-          : values
-                    .where(
-                      (event) =>
-                          event.rating == 'good' || event.rating == 'easy',
-                    )
-                    .length /
-                values.length;
-    }
+    return db.transaction(() async {
+      // 累计数保留全部记录；近期与连击以 asOf 为上限，避免未来异常记录污染。
+      final totals = await _ratingTotals();
+      final activity = await _reviewActivityData(days: 7, now: now);
+      final streak = await _streakAt(now);
+      final wordCounts = await wordProgress();
+      final counts = activity.dayCounts.map((day) => day.count).toList();
+      return StudyStats(
+        today: counts.last,
+        total: totals.ratings,
+        successRate: totals.ratings == 0 ? 0 : totals.goodEasy / totals.ratings,
+        recentSuccessRate: activity.ratingCount == 0
+            ? 0
+            : activity.goodEasyCount / activity.ratingCount,
+        streak: streak,
+        learnedWords: wordCounts.learned,
+        totalWords: wordCounts.total,
+        dailyCounts: counts,
+      );
+    });
+  }
 
-    final recent = events.where(
-      (event) =>
+  Future<ReviewActivity> reviewActivity({
+    required int days,
+    DateTime? asOf,
+  }) async {
+    if (days < 1 || days > 90) {
+      throw ArgumentError('活动回看只支持 1 到 90 个本地日。');
+    }
+    final now = asOf ?? nowUtc();
+    return db.transaction(() => _reviewActivityData(days: days, now: now));
+  }
+
+  Future<ReviewActivity> _reviewActivityData({
+    required int days,
+    required DateTime now,
+  }) async {
+    final start = calendar.midnightUtc(now, daysAhead: -(days - 1));
+    final startMs = start.millisecondsSinceEpoch;
+    // 累计数保留未来异常记录；近期活动窗口只统计到当前时刻。
+    final endMs = utcMilliseconds(now).millisecondsSinceEpoch + 1;
+    final totals = await _ratingTotals(startMs: startMs, endMs: endMs);
+    final timestamps = await _reviewTimestamps(startMs: startMs, endMs: endMs);
+    final startDay = calendar.dayKey(start);
+    final counts = List<int>.filled(days, 0);
+    for (final timestamp in timestamps) {
+      final offset =
           calendar.dayKey(
-            DateTime.fromMillisecondsSinceEpoch(event.reviewedAt, isUtc: true),
-          ) >=
-          today - 6,
+            DateTime.fromMillisecondsSinceEpoch(timestamp, isUtc: true),
+          ) -
+          startDay;
+      if (offset >= 0 && offset < days) counts[offset]++;
+    }
+    return ReviewActivity(
+      days: days,
+      dayCounts: List.generate(days, (index) {
+        final local = calendar.local(
+          calendar.midnightUtc(now, daysAhead: -(days - 1) + index),
+        );
+        return ReviewActivityDay(
+          localDate: DateTime.utc(local.year, local.month, local.day),
+          count: counts[index],
+        );
+      }),
+      ratingCount: totals.ratings,
+      goodEasyCount: totals.goodEasy,
     );
-    return StudyStats(
-      today: counts.last,
-      total: events.length,
-      successRate: success(events),
-      recentSuccessRate: success(recent),
-      streak: calendar.streak(dates, now),
-      learnedWords: wordCounts.learned,
-      totalWords: wordCounts.total,
-      dailyCounts: counts,
+  }
+
+  Future<({int ratings, int goodEasy})> _ratingTotals({
+    int? startMs,
+    int? endMs,
+  }) async {
+    final conditions = <String>['user_id = ?', 'training_mode = ?'];
+    final variables = <Variable<Object>>[
+      Variable(localUserId),
+      Variable(recognitionMode),
+    ];
+    if (startMs != null) {
+      conditions.add('reviewed_at >= ?');
+      variables.add(Variable(startMs));
+    }
+    if (endMs != null) {
+      conditions.add('reviewed_at < ?');
+      variables.add(Variable(endMs));
+    }
+    final row = await db.customSelect('''
+      SELECT COUNT(*) AS ratings,
+             COALESCE(SUM(CASE WHEN rating IN ('good', 'easy')
+                               THEN 1 ELSE 0 END), 0) AS good_easy
+      FROM review_events
+      WHERE ${conditions.join(' AND ')}
+    ''', variables: variables).getSingle();
+    return (
+      ratings: row.read<int>('ratings'),
+      goodEasy: row.read<int>('good_easy'),
     );
+  }
+
+  Future<List<int>> _reviewTimestamps({
+    required int startMs,
+    required int endMs,
+  }) async {
+    final rows = await db
+        .customSelect(
+          '''
+      SELECT reviewed_at
+      FROM review_events
+      WHERE user_id = ? AND training_mode = ?
+        AND reviewed_at >= ? AND reviewed_at < ?
+    ''',
+          variables: [
+            Variable(localUserId),
+            Variable(recognitionMode),
+            Variable(startMs),
+            Variable(endMs),
+          ],
+        )
+        .get();
+    return rows.map((row) => row.read<int>('reviewed_at')).toList();
+  }
+
+  Future<int> _streakAt(DateTime now) async {
+    final today = calendar.dayKey(now);
+    final nowMs = utcMilliseconds(now).millisecondsSinceEpoch;
+    // 没有 reviewed_at 索引时，单次精简时间戳扫描比小批量反复排序整表更稳。
+    final rows = await db
+        .customSelect(
+          '''
+      SELECT reviewed_at
+      FROM review_events
+      WHERE user_id = ? AND training_mode = ? AND reviewed_at <= ?
+      ORDER BY reviewed_at DESC
+    ''',
+          variables: [
+            Variable(localUserId),
+            Variable(recognitionMode),
+            Variable(nowMs),
+          ],
+        )
+        .get();
+    var expected = today;
+    var count = 0;
+    var started = false;
+    for (final row in rows) {
+      final day = calendar.dayKey(
+        DateTime.fromMillisecondsSinceEpoch(
+          row.read<int>('reviewed_at'),
+          isUtc: true,
+        ),
+      );
+      if (day > today) continue;
+      if (!started) {
+        if (day < today - 1) break;
+        started = true;
+        expected = day;
+      }
+      if (day == expected) {
+        count++;
+        expected--;
+      } else if (day < expected) {
+        break;
+      }
+    }
+    return count;
   }
 
   Future<DateTime?> nextDue() async {
@@ -1127,17 +1282,46 @@ class StudyRepository {
   Future<List<StudyItem>> spellingSample({
     String? wordbookId,
     int limit = 10,
+    EntryFilter filter = EntryFilter.all,
+    int? nowMilliseconds,
   }) async {
     if (limit < 0) throw ArgumentError('抽词数量不能为负数。');
     if (limit == 0) return [];
-    // 先在词书范围内按单词去重，再抽取 ID；仅把本轮题目解码到内存。
+    final now = nowMilliseconds ?? nowUtc().millisecondsSinceEpoch;
+    // 先在词书与筛选条件内按单词去重，再抽取符合条件的代表词义。
     final selected = db.selectOnly(db.wordSenses)
       ..addColumns([db.wordSenses.id.min()]);
+    selected.join([
+      if (wordbookId != null)
+        innerJoin(
+          db.wordbookEntries,
+          db.wordbookEntries.wordSenseId.equalsExp(db.wordSenses.id),
+        ),
+      leftOuterJoin(
+        db.memoryStates,
+        db.memoryStates.wordSenseId.equalsExp(db.wordSenses.id) &
+            db.memoryStates.userId.equals(localUserId) &
+            db.memoryStates.trainingMode.equals(recognitionMode),
+      ),
+    ]);
     if (wordbookId != null) {
-      final memberships = db.selectOnly(db.wordbookEntries)
-        ..addColumns([db.wordbookEntries.wordSenseId])
-        ..where(db.wordbookEntries.wordbookId.equals(wordbookId));
-      selected.where(db.wordSenses.id.isInQuery(memberships));
+      selected.where(db.wordbookEntries.wordbookId.equals(wordbookId));
+    }
+    switch (filter) {
+      case EntryFilter.all:
+        break;
+      case EntryFilter.unlearned:
+        selected.where(db.memoryStates.wordSenseId.isNull());
+        break;
+      case EntryFilter.learned:
+        selected.where(db.memoryStates.wordSenseId.isNotNull());
+        break;
+      case EntryFilter.due:
+        selected.where(
+          db.memoryStates.wordSenseId.isNotNull() &
+              db.memoryStates.due.isSmallerOrEqualValue(now),
+        );
+        break;
     }
     selected
       ..groupBy([db.wordSenses.wordId])
@@ -1154,6 +1338,7 @@ class StudyRepository {
             ),
           ])
           ..where(db.wordSenses.id.isInQuery(selected))
+          ..limit(limit)
           ..orderBy([OrderingTerm.random()]);
     return (await query.get())
         .map(

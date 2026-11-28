@@ -20,6 +20,20 @@ class BackupCodec {
   final UtcClock nowUtc;
   final void Function()? onRestored;
 
+  Future<BackupPreview> preview(String source) async {
+    final (data, exportedAt) = _parseAndValidate(source);
+    final settings = {for (final row in data.settings) row.key: row.value};
+    return BackupPreview(
+      exportedAt: exportedAt,
+      wordbookCount: data.books.length,
+      senseCount: data.senses.length,
+      // 校验已保证固定用户、固定训练方式且每个词义最多一条状态。
+      learnedSenseCount: data.states.length,
+      reviewEventCount: data.events.length,
+      dailyGoal: int.parse(settings['daily_new_goal']!),
+    );
+  }
+
   Future<String> export() => db.transaction(
     () async => jsonEncode({
       'format': 'lexi_loop_backup',
@@ -50,28 +64,7 @@ class BackupCodec {
   );
 
   Future<void> restore(String source) async {
-    late _Backup data;
-    try {
-      final root = jsonDecode(
-        source.startsWith('\uFEFF') ? source.substring(1) : source,
-      );
-      if (root is! Map<String, dynamic> ||
-          root['format'] != 'lexi_loop_backup' ||
-          root['schemaVersion'] != 1 ||
-          root['exportedAt'] is! String) {
-        throw const FormatException('备份标识、版本或导出时间不正确。');
-      }
-      final exportedAt = DateTime.parse(root['exportedAt'] as String);
-      if (!exportedAt.isUtc || exportedAt.microsecondsSinceEpoch % 1000 != 0) {
-        throw const FormatException('导出时间必须为 UTC 毫秒精度。');
-      }
-      data = _Backup(root);
-      _validate(data, exportedAt);
-    } on FormatException {
-      rethrow;
-    } catch (_) {
-      throw const FormatException('备份缺少必要字段，或字段类型不正确。');
-    }
+    final (data, _) = _parseAndValidate(source);
     await db.transaction(() async {
       await db.delete(db.reviewEvents).go();
       await db.delete(db.memoryStates).go();
@@ -93,6 +86,31 @@ class BackupCodec {
       await db.ensureExamWordbooks(reconcile: true);
     });
     onRestored?.call();
+  }
+
+  (_Backup, DateTime) _parseAndValidate(String source) {
+    try {
+      final root = jsonDecode(
+        source.startsWith('\uFEFF') ? source.substring(1) : source,
+      );
+      if (root is! Map<String, dynamic> ||
+          root['format'] != 'lexi_loop_backup' ||
+          root['schemaVersion'] != 1 ||
+          root['exportedAt'] is! String) {
+        throw const FormatException('备份标识、版本或导出时间不正确。');
+      }
+      final exportedAt = DateTime.parse(root['exportedAt'] as String);
+      if (!exportedAt.isUtc || exportedAt.microsecondsSinceEpoch % 1000 != 0) {
+        throw const FormatException('导出时间必须为 UTC 毫秒精度。');
+      }
+      final data = _Backup(root);
+      _validate(data, exportedAt);
+      return (data, exportedAt);
+    } on FormatException {
+      rethrow;
+    } catch (_) {
+      throw const FormatException('备份缺少必要字段，或字段类型不正确。');
+    }
   }
 
   void _validate(_Backup data, DateTime exportedAt) {
@@ -277,6 +295,24 @@ class BackupCodec {
       '备份设置缺失或与当前调度规则不兼容。',
     );
   }
+}
+
+class BackupPreview {
+  const BackupPreview({
+    required this.exportedAt,
+    required this.wordbookCount,
+    required this.senseCount,
+    required this.learnedSenseCount,
+    required this.reviewEventCount,
+    required this.dailyGoal,
+  });
+
+  final DateTime exportedAt;
+  final int wordbookCount;
+  final int senseCount;
+  final int learnedSenseCount;
+  final int reviewEventCount;
+  final int dailyGoal;
 }
 
 class _Backup {

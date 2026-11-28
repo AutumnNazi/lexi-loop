@@ -24,11 +24,14 @@ class StatsPage extends StatefulWidget {
     required this.dependencies,
     this.refreshListenable,
     this.historyLoader,
+    this.activityLoader,
   });
 
   final AppDependencies dependencies;
   final Listenable? refreshListenable;
   final Future<List<ReviewEvent>> Function(int senseId)? historyLoader;
+  final Future<ReviewActivity> Function(int days, DateTime asOf)?
+  activityLoader;
 
   @override
   State<StatsPage> createState() => _StatsPageState();
@@ -40,6 +43,11 @@ class _StatsPageState extends State<StatsPage> {
   String? _error;
   int _loadRevision = 0;
   StudyItem? _selectedItem;
+  int _activityDays = 7;
+  ReviewActivity? _activity;
+  bool _activityLoading = true;
+  String? _activityError;
+  int _activityRevision = 0;
 
   @override
   void initState() {
@@ -74,10 +82,18 @@ class _StatsPageState extends State<StatsPage> {
       setState(() {
         _loading = true;
         _error = null;
+        _activityRevision++;
+        _activity = null;
+        _activityLoading = true;
+        _activityError = null;
       });
     } else {
       _loading = true;
       _error = null;
+      _activityRevision++;
+      _activity = null;
+      _activityLoading = true;
+      _activityError = null;
     }
     final repository = widget.dependencies.repository;
     try {
@@ -117,6 +133,7 @@ class _StatsPageState extends State<StatsPage> {
         _loading = false;
         _error = null;
       });
+      await _loadActivity(asOf, _activityDays);
     } catch (error) {
       if (!mounted || revision != _loadRevision) return;
       setState(() {
@@ -138,6 +155,69 @@ class _StatsPageState extends State<StatsPage> {
     if (picked == null || !mounted) return;
     setState(() => _selectedItem = picked);
     await _load();
+  }
+
+  Future<void> _loadActivity(DateTime asOf, int days) async {
+    final revision = ++_activityRevision;
+    if (!mounted) return;
+    setState(() {
+      _activity = null;
+      _activityLoading = true;
+      _activityError = null;
+    });
+    try {
+      final loader = widget.activityLoader;
+      final activity = await (loader != null
+          ? loader(days, asOf)
+          : widget.dependencies.repository.reviewActivity(
+              days: days,
+              asOf: asOf,
+            ));
+      if (!mounted || revision != _activityRevision || days != _activityDays) {
+        return;
+      }
+      setState(() {
+        _activity = activity;
+        _activityLoading = false;
+        _activityError = null;
+      });
+    } catch (error) {
+      if (!mounted || revision != _activityRevision || days != _activityDays) {
+        return;
+      }
+      setState(() {
+        _activity = null;
+        _activityLoading = false;
+        _activityError = '$error';
+      });
+    }
+  }
+
+  void _selectActivityDays(int days) {
+    if (days == _activityDays) return;
+    setState(() => _activityDays = days);
+    final asOf = _snapshot?.asOf;
+    if (asOf != null) {
+      _loadActivity(asOf, days);
+    }
+  }
+
+  void _showActivityDay(ReviewActivityDay day) {
+    final date = day.localDate;
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        constraints: const BoxConstraints(maxWidth: 360),
+        title: Text('${date.year} 年 ${date.month} 月 ${date.day} 日'),
+        content: Text('${day.count} 次评分'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -164,13 +244,6 @@ class _StatsPageState extends State<StatsPage> {
                   child: Center(child: CircularProgressIndicator()),
                 );
               }
-              final maximum = math.max(
-                1,
-                data.stats.dailyCounts.reduce(math.max),
-              );
-              final weeklyTotal = data.stats.dailyCounts.reduce(
-                (a, b) => a + b,
-              );
               final selected = data.selected;
 
               return Column(
@@ -216,141 +289,7 @@ class _StatsPageState extends State<StatsPage> {
                   else
                     _buildForecast(context, tokens, data.forecast),
                   const SizedBox(height: 20),
-                  JournalSurface(
-                    padding: const EdgeInsets.all(22),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        const SectionHeader(title: '最近 7 天'),
-                        const SizedBox(height: 8),
-                        StatusBadge(
-                          label: '7 日共 $weeklyTotal 次评分',
-                          tone: StatusBadgeTone.neutral,
-                          showDot: false,
-                        ),
-                        const SizedBox(height: 20),
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: List.generate(7, (i) {
-                            final date = widget.dependencies.repository.calendar
-                                .local(data.asOf);
-                            final day = DateTime(
-                              date.year,
-                              date.month,
-                              date.day - 6 + i,
-                            );
-                            final count = data.stats.dailyCounts[i];
-                            final isToday = i == 6;
-                            final barColor = count == 0
-                                ? tokens.surfaceMuted
-                                : (isToday
-                                      ? tokens.primary
-                                      : tokens.primary.withValues(alpha: .52));
-                            final barHeight = count == 0
-                                ? 6.0
-                                : math.max(10.0, count / maximum * 116);
-
-                            return Expanded(
-                              child: Semantics(
-                                label: '${day.month} 月 ${day.day} 日，$count 次评分',
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 4,
-                                  ),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        '$count',
-                                        style: JournalTokens.tabular(
-                                          Theme.of(context).textTheme.labelSmall
-                                              ?.copyWith(
-                                                color: count == 0
-                                                    ? tokens.inkMuted
-                                                    : tokens.inkPrimary,
-                                                fontWeight: count == 0
-                                                    ? FontWeight.w500
-                                                    : FontWeight.w700,
-                                              ),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      SizedBox(
-                                        height: 116,
-                                        child: Stack(
-                                          clipBehavior: Clip.none,
-                                          alignment: Alignment.bottomCenter,
-                                          children: [
-                                            Positioned(
-                                              left: -4,
-                                              right: -4,
-                                              top: 58,
-                                              child: Divider(
-                                                height: 1,
-                                                color: tokens.border.withValues(
-                                                  alpha: .55,
-                                                ),
-                                              ),
-                                            ),
-                                            Positioned(
-                                              left: -4,
-                                              right: -4,
-                                              bottom: 0,
-                                              child: Divider(
-                                                height: 1,
-                                                color: tokens.border.withValues(
-                                                  alpha: .9,
-                                                ),
-                                              ),
-                                            ),
-                                            AnimatedContainer(
-                                              duration: const Duration(
-                                                milliseconds: 220,
-                                              ),
-                                              curve: Curves.easeOutCubic,
-                                              height: barHeight,
-                                              width: 22,
-                                              decoration: BoxDecoration(
-                                                color: barColor,
-                                                borderRadius:
-                                                    BorderRadius.circular(8),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        isToday ? '今' : '${day.day}',
-                                        textAlign: TextAlign.center,
-                                        style: JournalTokens.tabular(
-                                          Theme.of(context).textTheme.labelSmall
-                                              ?.copyWith(
-                                                color: isToday
-                                                    ? tokens.primary
-                                                    : tokens.inkSecondary,
-                                                fontWeight: isToday
-                                                    ? FontWeight.w700
-                                                    : FontWeight.w500,
-                                              ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            );
-                          }),
-                        ),
-                        const SizedBox(height: 14),
-                        Text(
-                          '成功率 = Good 与 Easy 的次数 ÷ 全部评分次数。',
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: tokens.inkSecondary),
-                        ),
-                      ],
-                    ),
-                  ),
+                  _buildActivitySection(context, tokens, data.asOf),
                   const SizedBox(height: 20),
                   if (selected == null)
                     const MessagePanel(
@@ -447,6 +386,224 @@ class _StatsPageState extends State<StatsPage> {
     );
   }
 
+  Widget _buildActivitySection(
+    BuildContext context,
+    JournalTokens tokens,
+    DateTime asOf,
+  ) {
+    final days = _activityDays;
+    final activity = _activity;
+    final success = activity?.successRate;
+    return JournalSurface(
+      padding: const EdgeInsets.all(22),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SectionHeader(title: days == 7 ? '最近 7 天' : '近 $days 天活动'),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final period in const [7, 30, 90])
+                ChoiceChip(
+                  key: ValueKey('stats-activity-period-$period'),
+                  label: Text('近 $period 天'),
+                  selected: days == period,
+                  onSelected: (_) => _selectActivityDays(period),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (_activityLoading)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const LinearProgressIndicator(),
+                const SizedBox(height: 10),
+                Text(
+                  '正在整理近 $days 天记录…',
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(color: tokens.inkSecondary),
+                ),
+              ],
+            )
+          else if (_activityError != null)
+            Container(
+              key: const ValueKey('stats-activity-error'),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: tokens.again.background,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: tokens.again.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '暂时无法读取活动回看',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      color: tokens.again.foreground,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _activityError!,
+                    style: Theme.of(context).textTheme.bodySmall
+                        ?.copyWith(color: tokens.again.foreground),
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton(
+                    key: const ValueKey('stats-activity-retry'),
+                    onPressed: () => _loadActivity(asOf, days),
+                    child: const Text('重试'),
+                  ),
+                ],
+              ),
+            )
+          else if (activity != null) ...[
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _ActivityMetric(
+                  label: '评分次数',
+                  value: '${activity.ratingCount}',
+                  valueKey: const ValueKey('stats-activity-rating-count'),
+                ),
+                _ActivityMetric(
+                  label: '学习天数',
+                  value: '${activity.activeDays}',
+                  valueKey: const ValueKey('stats-activity-active-days'),
+                ),
+                _ActivityMetric(
+                  label: 'Good+Easy 成功率',
+                  value: success == null ? '—' : '${(success * 100).round()}%',
+                  valueKey: const ValueKey('stats-activity-success-rate'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (days == 7)
+              _buildSevenDayActivity(context, tokens, activity)
+            else
+              _ActivityGrid(activity: activity, onDayTap: _showActivityDay),
+            const SizedBox(height: 12),
+            Text(
+              days == 7
+                  ? '成功率 = Good 与 Easy 的次数 ÷ 全部评分次数。'
+                  : '成功率 = Good 与 Easy 的次数 ÷ 全部评分次数；最近日期排在最前。',
+              style: Theme.of(context).textTheme.bodySmall
+                  ?.copyWith(color: tokens.inkSecondary),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSevenDayActivity(
+    BuildContext context,
+    JournalTokens tokens,
+    ReviewActivity activity,
+  ) {
+    final maximum = math.max(
+      1,
+      activity.dayCounts.map((day) => day.count).reduce(math.max),
+    );
+    return Row(
+      key: const ValueKey('stats-activity-bars'),
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: List.generate(7, (i) {
+        final day = activity.dayCounts[i].localDate;
+        final count = activity.dayCounts[i].count;
+        final isToday = i == 6;
+        final barColor = count == 0
+            ? tokens.surfaceMuted
+            : (isToday
+                  ? tokens.primary
+                  : tokens.primary.withValues(alpha: .52));
+        final barHeight = count == 0
+            ? 6.0
+            : math.max(10.0, count / maximum * 116);
+        return Expanded(
+          child: Semantics(
+            label: '${day.month} 月 ${day.day} 日，$count 次评分',
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '$count',
+                    style: JournalTokens.tabular(
+                      Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: count == 0 ? tokens.inkMuted : tokens.inkPrimary,
+                        fontWeight: count == 0
+                            ? FontWeight.w500
+                            : FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 116,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      alignment: Alignment.bottomCenter,
+                      children: [
+                        Positioned(
+                          left: -4,
+                          right: -4,
+                          top: 58,
+                          child: Divider(
+                            height: 1,
+                            color: tokens.border.withValues(alpha: .55),
+                          ),
+                        ),
+                        Positioned(
+                          left: -4,
+                          right: -4,
+                          bottom: 0,
+                          child: Divider(
+                            height: 1,
+                            color: tokens.border.withValues(alpha: .9),
+                          ),
+                        ),
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 220),
+                          curve: Curves.easeOutCubic,
+                          height: barHeight,
+                          width: 22,
+                          decoration: BoxDecoration(
+                            color: barColor,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    isToday ? '今' : '${day.day}',
+                    textAlign: TextAlign.center,
+                    style: JournalTokens.tabular(
+                      Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: isToday ? tokens.primary : tokens.inkSecondary,
+                        fontWeight: isToday ? FontWeight.w700 : FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
   Widget _buildForecast(
     BuildContext context,
     JournalTokens tokens,
@@ -522,6 +679,147 @@ class _StatsPageState extends State<StatsPage> {
   }
 }
 
+class _ActivityMetric extends StatelessWidget {
+  const _ActivityMetric({
+    required this.label,
+    required this.value,
+    required this.valueKey,
+  });
+
+  final String label;
+  final String value;
+  final Key valueKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = JournalTokens.of(context);
+    return Container(
+      constraints: const BoxConstraints(minWidth: 88),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: tokens.surfaceMuted,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: tokens.border),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: Theme.of(context).textTheme.bodySmall
+                ?.copyWith(color: tokens.inkSecondary),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            key: valueKey,
+            style: JournalTokens.tabular(
+              Theme.of(context).textTheme.titleMedium?.copyWith(
+                color: tokens.inkPrimary,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActivityGrid extends StatelessWidget {
+  const _ActivityGrid({required this.activity, required this.onDayTap});
+
+  final ReviewActivity activity;
+  final ValueChanged<ReviewActivityDay> onDayTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = JournalTokens.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = constraints.maxWidth >= 720
+            ? 10
+            : constraints.maxWidth >= 300
+            ? 5
+            : 4;
+        const spacing = 8.0;
+        final cellWidth =
+            (constraints.maxWidth - spacing * (columns - 1)) / columns;
+        // 最近日期放最前，长范围在手机上优先看见今天。
+        final days = activity.dayCounts.reversed.toList();
+        return Wrap(
+          key: const ValueKey('stats-activity-grid'),
+          spacing: spacing,
+          runSpacing: spacing,
+          children: [
+            for (final day in days)
+              SizedBox(
+                width: cellWidth,
+                child: Semantics(
+                  button: true,
+                  label:
+                      '${day.localDate.year} 年 ${day.localDate.month} 月 '
+                      '${day.localDate.day} 日，${day.count} 次评分',
+                  child: InkWell(
+                    key: ValueKey(
+                      'activity-day-${day.localDate.year}-${day.localDate.month}-${day.localDate.day}',
+                    ),
+                    onTap: () => onDayTap(day),
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 3,
+                        vertical: 7,
+                      ),
+                      decoration: BoxDecoration(
+                        color: day.count == 0
+                            ? tokens.surfaceMuted
+                            : tokens.heroSurface,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: day.count == 0
+                              ? tokens.border
+                              : tokens.primary.withValues(alpha: .42),
+                        ),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              '${day.localDate.month}/${day.localDate.day}',
+                              maxLines: 1,
+                              style: Theme.of(context).textTheme.labelSmall
+                                  ?.copyWith(color: tokens.inkSecondary),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '${day.count}',
+                            style: JournalTokens.tabular(
+                              Theme.of(context).textTheme.titleSmall?.copyWith(
+                                color: day.count == 0
+                                    ? tokens.inkMuted
+                                    : tokens.primary,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _MemoryCurvePanel extends StatefulWidget {
   const _MemoryCurvePanel({
     super.key,
@@ -580,8 +878,10 @@ class _MemoryCurvePanelState extends State<_MemoryCurvePanel> {
     try {
       final loader =
           widget.historyLoader ??
-          (int senseId) =>
-              widget.dependencies.repository.history(senseId: senseId);
+          (int senseId) => widget.dependencies.repository.history(
+            senseId: senseId,
+            limit: 6,
+          );
       final history = await loader(widget.senseId);
       if (!mounted || generation != _generation) return;
       setState(() => _history = history);

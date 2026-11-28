@@ -84,6 +84,49 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  Widget importHost(
+    AppDependencies dependencies, {
+    WordbookFilePicker? filePicker,
+    WordbookFileParser? fileParser,
+    WordbookTextParser? textParser,
+    bool deep = false,
+  }) {
+    Widget page() => WordbookImportPage(
+      dependencies: dependencies,
+      filePicker: filePicker,
+      fileParser: fileParser,
+      textParser: textParser,
+    );
+    return MaterialApp(
+      theme: journalTheme(Brightness.light),
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: Center(
+            child: TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (secondContext) => deep
+                      ? Scaffold(
+                          body: Center(
+                            child: TextButton(
+                              onPressed: () => Navigator.of(secondContext).push(
+                                MaterialPageRoute<void>(builder: (_) => page()),
+                              ),
+                              child: const Text('打开导入'),
+                            ),
+                          ),
+                        )
+                      : page(),
+                ),
+              ),
+              child: Text(deep ? '进入二级' : '打开导入'),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   testWidgets('预览后确认导入，连点只创建一本词书并可一键开始学习', (tester) async {
     await surface(tester);
     final dependencies = createDependencies();
@@ -469,6 +512,315 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('总行数 1'), findsNothing);
     expect(find.byKey(const ValueKey('pick-wordbook-file')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('粘贴草稿返回确认，取消保留草稿，空粘贴框直接返回', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final dependencies = createDependencies();
+    await tester.runAsync(dependencies.initialize);
+    await tester.pumpWidget(importHost(dependencies));
+    await tester.tap(find.text('打开导入'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本次词书导入？'), findsNothing);
+    expect(find.text('打开导入'), findsOneWidget);
+    await tester.tap(find.text('打开导入'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('paste-wordbook-text')));
+    await tester.pumpAndSettle();
+    final paste = find.byKey(const ValueKey('wordbook-paste-input'));
+    await tester.enterText(paste, 'apple\t苹果');
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本次词书导入？'), findsOneWidget);
+    await tester.tap(find.text('继续导入'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(paste).controller!.text, 'apple\t苹果');
+
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('放弃并返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('打开导入'), findsOneWidget);
+    expect(await dependencies.repository.books(), hasLength(5));
+
+    await tester.tap(find.text('打开导入'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('paste-wordbook-text')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本次词书导入？'), findsNothing);
+    expect(find.text('打开导入'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('导入预览返回确认，取消保留预览，放弃不写库', (tester) async {
+    await surface(tester, width: 320, scale: 1.5);
+    final dependencies = createDependencies();
+    await tester.runAsync(dependencies.initialize);
+    final file = WordbookPickedFile(name: '预览.csv', bytes: Uint8List(0));
+    final result = parsed(
+      totalRows: 2,
+      entries: const [
+        WordbookEntryDraft(word: 'apple', definition: '苹果'),
+        WordbookEntryDraft(word: 'pear', definition: '梨'),
+      ],
+    );
+    await tester.pumpWidget(
+      importHost(
+        dependencies,
+        filePicker: () async => file,
+        fileParser: (_, _) async => result,
+        deep: true,
+      ),
+    );
+    await tester.tap(find.text('进入二级'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开导入'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('pick-wordbook-file')));
+    await tester.pumpAndSettle();
+    expect(find.text('总行数 2'), findsOneWidget);
+
+    final name = find.byKey(const ValueKey('import-book-name'));
+    final confirm = find.byKey(const ValueKey('confirm-import-wordbook'));
+    final staleImport = tester.widget<FilledButton>(confirm).onPressed;
+    expect(staleImport, isNotNull);
+    await tester.enterText(name, '');
+    // 模拟名称清空后同帧旧 onPressed 回调，名称错误必须可修正后恢复导入。
+    staleImport!();
+    await tester.pumpAndSettle();
+    expect(find.text('请填写 1 到 40 字的词书名称。'), findsOneWidget);
+    expect(tester.widget<FilledButton>(confirm).onPressed, isNull);
+    await tester.enterText(name, '修正后的词书');
+    await tester.pump();
+    expect(tester.widget<FilledButton>(confirm).onPressed, isNotNull);
+
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本次词书导入？'), findsOneWidget);
+    await tester.tap(find.text('继续导入'));
+    await tester.pumpAndSettle();
+    expect(find.text('总行数 2'), findsOneWidget);
+    expect(tester.widget<TextField>(name).controller!.text, '修正后的词书');
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('放弃并返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('打开导入'), findsOneWidget);
+    expect(await dependencies.repository.books(), hasLength(5));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('解析中放弃返回后旧结果不会回填或写库', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final dependencies = createDependencies();
+    await tester.runAsync(dependencies.initialize);
+    final gate = Completer<ParsedWordbook>();
+    final file = WordbookPickedFile(name: '慢解析.csv', bytes: Uint8List(0));
+    await tester.pumpWidget(
+      importHost(
+        dependencies,
+        filePicker: () async => file,
+        fileParser: (_, _) => gate.future,
+      ),
+    );
+    await tester.tap(find.text('打开导入'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('pick-wordbook-file')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('取消解析'), findsOneWidget);
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('放弃本次词书导入？'), findsOneWidget);
+    await tester.tap(find.text('放弃并返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('打开导入'), findsOneWidget);
+
+    gate.complete(
+      parsed(
+        totalRows: 1,
+        entries: const [WordbookEntryDraft(word: '晚到', definition: '不应出现')],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('总行数 1'), findsNothing);
+    expect(await dependencies.repository.books(), hasLength(5));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('导入成功态返回不弹确认', (tester) async {
+    await surface(tester, width: 1280, scale: 1.0);
+    final dependencies = createDependencies();
+    await tester.runAsync(dependencies.initialize);
+    final file = WordbookPickedFile(name: '成功.csv', bytes: Uint8List(0));
+    final result = parsed(
+      totalRows: 1,
+      entries: const [WordbookEntryDraft(word: 'apple', definition: '苹果')],
+    );
+    await tester.pumpWidget(
+      importHost(
+        dependencies,
+        filePicker: () async => file,
+        fileParser: (_, _) async => result,
+        deep: true,
+      ),
+    );
+    await tester.tap(find.text('进入二级'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开导入'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('pick-wordbook-file')));
+    await tester.pumpAndSettle();
+    final confirm = find.byKey(const ValueKey('confirm-import-wordbook'));
+    await tester.ensureVisible(confirm);
+    await tester.tap(confirm);
+    await tester.pumpAndSettle();
+    expect(find.text('导入完成'), findsOneWidget);
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本次词书导入？'), findsNothing);
+    expect(find.text('打开导入'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('错误态内联返回也进入丢弃确认', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final dependencies = createDependencies();
+    await tester.runAsync(dependencies.initialize);
+    final file = WordbookPickedFile(name: '错误.csv', bytes: Uint8List(0));
+    await tester.pumpWidget(
+      importHost(
+        dependencies,
+        filePicker: () async => file,
+        fileParser: (_, _) async => throw StateError('解析失败'),
+      ),
+    );
+    await tester.tap(find.text('打开导入'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('pick-wordbook-file')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('解析失败'), findsOneWidget);
+    await tester.ensureVisible(find.text('返回'));
+    await tester.tap(find.text('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本次词书导入？'), findsOneWidget);
+    await tester.tap(find.text('继续导入'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('解析失败'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('预览内联取消也进入丢弃确认', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final dependencies = createDependencies();
+    await tester.runAsync(dependencies.initialize);
+    final file = WordbookPickedFile(name: '内联取消.csv', bytes: Uint8List(0));
+    final result = parsed(
+      totalRows: 1,
+      entries: const [WordbookEntryDraft(word: 'apple', definition: '苹果')],
+    );
+    await tester.pumpWidget(
+      importHost(
+        dependencies,
+        filePicker: () async => file,
+        fileParser: (_, _) async => result,
+      ),
+    );
+    await tester.tap(find.text('打开导入'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('pick-wordbook-file')));
+    await tester.pumpAndSettle();
+    expect(find.text('总行数 1'), findsOneWidget);
+    await tester.ensureVisible(find.text('取消'));
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本次词书导入？'), findsOneWidget);
+    await tester.tap(find.text('继续导入'));
+    await tester.pumpAndSettle();
+    expect(find.text('总行数 1'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('成功态内联返回不确认且只退一层', (tester) async {
+    await surface(tester, width: 1280, scale: 1.0);
+    final dependencies = createDependencies();
+    await tester.runAsync(dependencies.initialize);
+    final file = WordbookPickedFile(name: '成功内联.csv', bytes: Uint8List(0));
+    final result = parsed(
+      totalRows: 1,
+      entries: const [WordbookEntryDraft(word: 'apple', definition: '苹果')],
+    );
+    await tester.pumpWidget(
+      importHost(
+        dependencies,
+        filePicker: () async => file,
+        fileParser: (_, _) async => result,
+        deep: true,
+      ),
+    );
+    await tester.tap(find.text('进入二级'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开导入'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('pick-wordbook-file')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('confirm-import-wordbook')),
+    );
+    await tester.tap(find.byKey(const ValueKey('confirm-import-wordbook')));
+    await tester.pumpAndSettle();
+    expect(find.text('导入完成'), findsOneWidget);
+    await tester.ensureVisible(find.text('返回词书页'));
+    final callback = tester
+        .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '返回词书页'))
+        .onPressed!;
+    callback();
+    callback();
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本次词书导入？'), findsNothing);
+    expect(find.text('打开导入'), findsOneWidget);
+    expect(find.text('进入二级'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('丢弃确认继续按钮同帧重复回调不退出草稿页', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final dependencies = createDependencies();
+    await tester.runAsync(dependencies.initialize);
+    await tester.pumpWidget(importHost(dependencies, deep: true));
+    await tester.tap(find.text('进入二级'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开导入'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('paste-wordbook-text')));
+    await tester.pumpAndSettle();
+    final paste = find.byKey(const ValueKey('wordbook-paste-input'));
+    await tester.enterText(paste, 'apple\t苹果');
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本次词书导入？'), findsOneWidget);
+    final continueButton = find.widgetWithText(TextButton, '继续导入');
+    final callback = tester.widget<TextButton>(continueButton).onPressed!;
+    callback();
+    callback();
+    await tester.pumpAndSettle();
+    expect(find.text('打开导入'), findsNothing);
+    expect(paste, findsOneWidget);
+    expect(tester.widget<TextField>(paste).controller!.text, 'apple\t苹果');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });

@@ -89,12 +89,66 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
   int? _mappingExample;
   bool _mappingSkipFirst = false;
   int _requestId = 0;
+  bool _exitDialogOpen = false;
+  bool _allowExit = false;
+  bool _routePopped = false;
+  String? _nameError;
+
+  bool get _hasPendingChanges {
+    if (_result != null) return false;
+    return _file != null ||
+        _pasteText != null ||
+        _parsed != null ||
+        _entries.isNotEmpty ||
+        _name.text.trim().isNotEmpty ||
+        (_showPaste && _paste.text.trim().isNotEmpty);
+  }
+
+  bool get _busyForBack => _importing || _starting;
+  bool get _inputsLocked =>
+      _importing || _starting || _exitDialogOpen || _allowExit;
 
   @override
   void dispose() {
     _name.dispose();
     _paste.dispose();
     super.dispose();
+  }
+
+  void _exitPage() {
+    if (!mounted || _allowExit) return;
+    _requestId++;
+    setState(() => _allowExit = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_routePopped) Navigator.of(context).maybePop();
+    });
+  }
+
+  Future<void> _handleBack() async {
+    if (_exitDialogOpen || _allowExit) return;
+    if (_busyForBack) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_importing ? '正在导入词书，请稍候…' : '正在设置学习词书，请稍候…')),
+      );
+      return;
+    }
+    if (!_hasPendingChanges) {
+      _exitPage();
+      return;
+    }
+    _exitDialogOpen = true;
+    final discard = await confirmDiscardChanges(
+      context,
+      title: '放弃本次词书导入？',
+      message: '继续导入会保留当前来源、名称、映射和预览；放弃并返回后不会写入词库。',
+      keepLabel: '继续导入',
+    );
+    _exitDialogOpen = false;
+    if (mounted) setState(() {});
+    if (!mounted || !discard) return;
+    // 只取消后续结果接收；已在运行的 isolate 不承诺终止。
+    _requestId++;
+    _exitPage();
   }
 
   Future<WordbookPickedFile?> _defaultPickFile() async {
@@ -143,7 +197,10 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
   );
 
   Future<void> _pickFile() async {
-    if (_loading || _importing || _picking) return;
+    if (_loading || _importing || _picking || _exitDialogOpen || _allowExit) {
+      return;
+    }
+    final requestId = ++_requestId;
     setState(() {
       _picking = true;
       _error = null;
@@ -152,8 +209,15 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
     });
     try {
       final picked = await (widget.filePicker ?? _defaultPickFile)();
-      if (picked == null || !mounted) return;
+      if (picked == null ||
+          !mounted ||
+          requestId != _requestId ||
+          _exitDialogOpen ||
+          _allowExit) {
+        return;
+      }
       setState(() {
+        _picking = false;
         _file = picked;
         _pasteText = null;
         _options = const WordbookParseOptions();
@@ -162,23 +226,37 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
         _issues = const [];
         _result = null;
         _importError = null;
+        _totalRows = 0;
+        _duplicateRows = 0;
+        _errorRows = 0;
+        _wordListResolved = false;
+        _mappingDelimiter = WordbookDelimiter.tab;
+        _mappingWord = null;
+        _mappingDefinition = null;
+        _mappingPhonetic = null;
+        _mappingExample = null;
+        _mappingSkipFirst = false;
         _name.clear();
-        _requestId++;
+        _nameError = null;
       });
       await _parseSource(options: _options);
     } catch (error) {
-      if (mounted) {
+      if (mounted && requestId == _requestId) {
         setState(() {
           _error = '$error';
         });
       }
     } finally {
-      if (mounted) setState(() => _picking = false);
+      if (mounted && requestId == _requestId) {
+        setState(() => _picking = false);
+      }
     }
   }
 
   Future<void> _parsePastedText() async {
-    if (_loading || _importing || _picking) return;
+    if (_loading || _importing || _picking || _exitDialogOpen || _allowExit) {
+      return;
+    }
     final text = _paste.text;
     if (text.trim().isEmpty) {
       setState(() => _error = '请先粘贴词语和定义文本。');
@@ -196,14 +274,25 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
         delimiter: _pasteWordListMode ? null : _pasteDelimiter,
         forceWordList: _pasteWordListMode,
       );
+      _totalRows = 0;
+      _duplicateRows = 0;
+      _errorRows = 0;
+      _wordListResolved = false;
+      _mappingDelimiter = WordbookDelimiter.tab;
+      _mappingWord = null;
+      _mappingDefinition = null;
+      _mappingPhonetic = null;
+      _mappingExample = null;
+      _mappingSkipFirst = false;
       _name.clear();
+      _nameError = null;
       _requestId++;
     });
     await _parseSource(options: _options);
   }
 
   Future<void> _parseSource({required WordbookParseOptions options}) async {
-    if (_loading || _importing) return;
+    if (_loading || _importing || _exitDialogOpen || _allowExit) return;
     final requestId = ++_requestId;
     final file = _file;
     final pasteText = _pasteText;
@@ -270,6 +359,7 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
       }
       setState(() {
         _loading = false;
+        _nameError = null;
         _parsed = parsed;
         _entries = entries;
         _issues = issues;
@@ -289,6 +379,7 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
   }
 
   Future<void> _applyMapping() async {
+    if (_loading || _importing || _exitDialogOpen || _allowExit) return;
     final parsed = _parsed;
     if (parsed == null) return;
     if (_mappingWord == null || _mappingDefinition == null) {
@@ -312,6 +403,7 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
   }
 
   void _resetSource() {
+    if (_importing || _starting || _exitDialogOpen || _allowExit) return;
     _requestId++;
     setState(() {
       _loading = false;
@@ -327,11 +419,26 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
       _notice = null;
       _showPaste = false;
       _name.clear();
+      _nameError = null;
       _paste.clear();
+      _options = const WordbookParseOptions();
+      _pasteDelimiter = null;
+      _pasteWordListMode = false;
+      _mappingDelimiter = WordbookDelimiter.tab;
+      _mappingWord = null;
+      _mappingDefinition = null;
+      _mappingPhonetic = null;
+      _mappingExample = null;
+      _mappingSkipFirst = false;
+      _totalRows = 0;
+      _duplicateRows = 0;
+      _errorRows = 0;
+      _wordListResolved = false;
     });
   }
 
   void _cancelPaste() {
+    if (_importing || _starting || _exitDialogOpen || _allowExit) return;
     _requestId++;
     setState(() {
       _showPaste = false;
@@ -341,18 +448,29 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
       _error = null;
       _importError = null;
       _notice = null;
+      _nameError = null;
     });
   }
 
   Future<void> _import() async {
-    if (_loading || _importing || _result != null) return;
+    if (_loading ||
+        _importing ||
+        _starting ||
+        _result != null ||
+        _exitDialogOpen ||
+        _allowExit ||
+        _nameError != null) {
+      return;
+    }
+    final parsed = _parsed;
+    if (parsed == null || parsed.requiresMapping || _error != null) return;
     final cleanName = _name.text.trim();
     if (cleanName.isEmpty) {
-      setState(() => _error = '请填写 1 到 40 字的词书名称。');
+      setState(() => _nameError = '请填写 1 到 40 字的词书名称。');
       return;
     }
     if (cleanName.runes.length > 40) {
-      setState(() => _error = '词书名称不能超过 40 字。');
+      setState(() => _nameError = '词书名称不能超过 40 字。');
       return;
     }
     if (_entries.isEmpty || _errorRows > 0) {
@@ -361,6 +479,7 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
     }
     setState(() {
       _importing = true;
+      _nameError = null;
       _error = null;
       _importError = null;
       _notice = null;
@@ -382,7 +501,7 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
 
   Future<void> _setActiveAndStart() async {
     final result = _result;
-    if (result == null || _starting) return;
+    if (result == null || _starting || _exitDialogOpen || _allowExit) return;
     setState(() {
       _starting = true;
       _error = null;
@@ -428,131 +547,154 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
   Widget build(BuildContext context) {
     final tokens = JournalTokens.of(context);
     final width = MediaQuery.sizeOf(context).width;
-    return Scaffold(
-      appBar: AppBar(
-        leading: journalBackButton(context),
-        title: const Text('导入自定义词库'),
-      ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: EdgeInsets.fromLTRB(
-            width < 600 ? 18 : 36,
-            12,
-            width < 600 ? 18 : 36,
-            36,
-          ),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 820),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (_result != null)
-                    _buildSuccess(context, tokens, _result!)
-                  else ...[
-                    Text(
-                      '把你的词，带进来',
-                      style: Theme.of(context).textTheme.headlineMedium,
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      '支持 CSV、TSV、TXT、JSON、JSONL、Anki 纯文本；'
-                      'Quizlet 可粘贴词语/定义。先预览校验，确认前不会写库。',
-                      style: Theme.of(context).textTheme.bodyMedium
-                          ?.copyWith(color: tokens.inkSecondary),
-                    ),
-                    const SizedBox(height: 18),
-                    if (_file == null &&
-                        (_pasteText == null || _parsed == null)) ...[
-                      if (!_showPaste) ...[
+    return PopScope(
+      canPop: _allowExit,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) {
+          _routePopped = true;
+          return;
+        }
+        _handleBack();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          leading: journalBackButton(context),
+          title: const Text('导入自定义词库'),
+        ),
+        body: SafeArea(
+          child: SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(
+              width < 600 ? 18 : 36,
+              12,
+              width < 600 ? 18 : 36,
+              36,
+            ),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 820),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (_result != null)
+                      _buildSuccess(context, tokens, _result!)
+                    else ...[
+                      Text(
+                        '把你的词，带进来',
+                        style: Theme.of(context).textTheme.headlineMedium,
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '支持 CSV、TSV、TXT、JSON、JSONL、Anki 纯文本；'
+                        'Quizlet 可粘贴词语/定义。先预览校验，确认前不会写库。',
+                        style: Theme.of(context).textTheme.bodyMedium
+                            ?.copyWith(color: tokens.inkSecondary),
+                      ),
+                      const SizedBox(height: 18),
+                      if (_file == null &&
+                          (_pasteText == null || _parsed == null)) ...[
+                        if (!_showPaste) ...[
+                          Wrap(
+                            spacing: 12,
+                            runSpacing: 12,
+                            children: [
+                              FilledButton.icon(
+                                key: const ValueKey('pick-wordbook-file'),
+                                onPressed:
+                                    _loading ||
+                                        _picking ||
+                                        _importing ||
+                                        _exitDialogOpen ||
+                                        _allowExit
+                                    ? null
+                                    : _pickFile,
+                                icon: const JournalIcon(
+                                  Icons.file_upload_outlined,
+                                  size: 18,
+                                ),
+                                label: const Text('选择文件'),
+                              ),
+                              OutlinedButton.icon(
+                                key: const ValueKey('paste-wordbook-text'),
+                                onPressed:
+                                    _loading ||
+                                        _picking ||
+                                        _importing ||
+                                        _exitDialogOpen ||
+                                        _allowExit
+                                    ? null
+                                    : () => setState(() => _showPaste = true),
+                                icon: const JournalIcon(
+                                  Icons.edit_outlined,
+                                  size: 18,
+                                ),
+                                label: const Text('粘贴文本'),
+                              ),
+                            ],
+                          ),
+                          if (_picking)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 14),
+                              child: LinearProgressIndicator(),
+                            ),
+                        ] else
+                          _buildPasteInput(context),
+                      ],
+                      const SizedBox(height: 14),
+                      _buildFormatHelp(context, tokens),
+                      if (_error != null ||
+                          _importError != null ||
+                          _notice != null) ...[
+                        const SizedBox(height: 14),
+                        _buildMessage(context, tokens),
+                      ],
+                      if (_loading)
+                        Padding(
+                          padding: const EdgeInsets.all(42),
+                          child: Column(
+                            children: [
+                              const CircularProgressIndicator(),
+                              const SizedBox(height: 14),
+                              TextButton(
+                                onPressed: _resetSource,
+                                child: const Text('取消解析'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (!_loading && _parsed != null) ...[
+                        const SizedBox(height: 20),
+                        AbsorbPointer(
+                          absorbing: _inputsLocked,
+                          child: _buildPreview(context, tokens),
+                        ),
+                      ],
+                      if (!_loading &&
+                          _parsed == null &&
+                          _error != null &&
+                          (_file != null || _pasteText != null)) ...[
+                        const SizedBox(height: 14),
                         Wrap(
-                          spacing: 12,
-                          runSpacing: 12,
+                          spacing: 10,
+                          runSpacing: 8,
                           children: [
-                            FilledButton.icon(
-                              key: const ValueKey('pick-wordbook-file'),
-                              onPressed: _loading || _picking
-                                  ? null
-                                  : _pickFile,
-                              icon: const JournalIcon(
-                                Icons.file_upload_outlined,
-                                size: 18,
-                              ),
-                              label: const Text('选择文件'),
+                            FilledButton(
+                              onPressed: () => _parseSource(options: _options),
+                              child: const Text('重试解析'),
                             ),
-                            OutlinedButton.icon(
-                              key: const ValueKey('paste-wordbook-text'),
-                              onPressed: _loading || _picking
-                                  ? null
-                                  : () => setState(() => _showPaste = true),
-                              icon: const JournalIcon(
-                                Icons.edit_outlined,
-                                size: 18,
-                              ),
-                              label: const Text('粘贴文本'),
-                            ),
-                          ],
-                        ),
-                        if (_picking)
-                          const Padding(
-                            padding: EdgeInsets.only(top: 14),
-                            child: LinearProgressIndicator(),
-                          ),
-                      ] else
-                        _buildPasteInput(context),
-                    ],
-                    const SizedBox(height: 14),
-                    _buildFormatHelp(context, tokens),
-                    if (_error != null ||
-                        _importError != null ||
-                        _notice != null) ...[
-                      const SizedBox(height: 14),
-                      _buildMessage(context, tokens),
-                    ],
-                    if (_loading)
-                      Padding(
-                        padding: const EdgeInsets.all(42),
-                        child: Column(
-                          children: [
-                            const CircularProgressIndicator(),
-                            const SizedBox(height: 14),
-                            TextButton(
+                            OutlinedButton(
                               onPressed: _resetSource,
-                              child: const Text('取消解析'),
+                              child: const Text('重新选择或粘贴'),
+                            ),
+                            TextButton(
+                              onPressed: _handleBack,
+                              child: const Text('返回'),
                             ),
                           ],
                         ),
-                      ),
-                    if (!_loading && _parsed != null) ...[
-                      const SizedBox(height: 20),
-                      _buildPreview(context, tokens),
-                    ],
-                    if (!_loading &&
-                        _parsed == null &&
-                        _error != null &&
-                        (_file != null || _pasteText != null)) ...[
-                      const SizedBox(height: 14),
-                      Wrap(
-                        spacing: 10,
-                        runSpacing: 8,
-                        children: [
-                          FilledButton(
-                            onPressed: () => _parseSource(options: _options),
-                            child: const Text('重试解析'),
-                          ),
-                          OutlinedButton(
-                            onPressed: _resetSource,
-                            child: const Text('重新选择或粘贴'),
-                          ),
-                          TextButton(
-                            onPressed: () => Navigator.of(context).pop(),
-                            child: const Text('返回'),
-                          ),
-                        ],
-                      ),
+                      ],
                     ],
                   ],
-                ],
+                ),
               ),
             ),
           ),
@@ -690,10 +832,22 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
               children: [
                 FilledButton(
                   key: const ValueKey('parse-pasted-wordbook'),
-                  onPressed: _loading || _picking ? null : _parsePastedText,
+                  onPressed:
+                      _loading ||
+                          _picking ||
+                          _importing ||
+                          _exitDialogOpen ||
+                          _allowExit
+                      ? null
+                      : _parsePastedText,
                   child: const Text('解析并预览'),
                 ),
-                TextButton(onPressed: _cancelPaste, child: const Text('取消粘贴')),
+                TextButton(
+                  onPressed: _importing || _exitDialogOpen || _allowExit
+                      ? null
+                      : _cancelPaste,
+                  child: const Text('取消粘贴'),
+                ),
               ],
             ),
           ],
@@ -709,7 +863,10 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
     final canImport =
         !_loading &&
         !_importing &&
+        !_starting &&
+        !_inputsLocked &&
         _error == null &&
+        _nameError == null &&
         _errorRows == 0 &&
         _entries.isNotEmpty &&
         nameValid &&
@@ -728,12 +885,13 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
                 key: const ValueKey('import-book-name'),
                 controller: _name,
                 maxLength: 40,
-                enabled: !_importing,
+                enabled: !_inputsLocked,
                 decoration: InputDecoration(
                   labelText: '词书名称',
-                  errorText: nameText.isEmpty ? '请填写词书名称' : null,
+                  errorText:
+                      _nameError ?? (nameText.isEmpty ? '请填写词书名称' : null),
                 ),
-                onChanged: (_) => setState(() {}),
+                onChanged: (_) => setState(() => _nameError = null),
               ),
               const SizedBox(height: 6),
               Wrap(
@@ -902,11 +1060,17 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
               label: Text(_importing ? '正在导入…' : '确认导入'),
             ),
             OutlinedButton(
-              onPressed: _importing ? null : _resetSource,
+              onPressed:
+                  _importing || _starting || _exitDialogOpen || _allowExit
+                  ? null
+                  : _resetSource,
               child: const Text('重新选择'),
             ),
             TextButton(
-              onPressed: _importing ? null : () => Navigator.of(context).pop(),
+              onPressed:
+                  _importing || _starting || _exitDialogOpen || _allowExit
+                  ? null
+                  : _handleBack,
               child: const Text('取消'),
             ),
           ],
@@ -1141,7 +1305,7 @@ class _WordbookImportPageState extends State<WordbookImportPage> {
         ),
         const SizedBox(height: 10),
         OutlinedButton(
-          onPressed: _starting ? null : () => Navigator.of(context).pop(),
+          onPressed: _starting ? null : _handleBack,
           child: const Text('返回词书页'),
         ),
       ],

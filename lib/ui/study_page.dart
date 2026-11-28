@@ -18,11 +18,18 @@ class StudyPage extends StatefulWidget {
     this.senseId,
     this.wordbookId,
     this.todayPlan = false,
+    this.queueStatusLoader,
+    this.sessionSummaryLoader,
+    this.itemLoader,
   });
   final AppDependencies dependencies;
   final int? senseId;
   final String? wordbookId;
   final bool todayPlan;
+  final Future<StudyQueueStatus> Function()? queueStatusLoader;
+  final Future<StudySessionSummary> Function(Set<String> eventIds)?
+  sessionSummaryLoader;
+  final Future<StudyItem?> Function(int senseId)? itemLoader;
   @override
   State<StudyPage> createState() => _StudyPageState();
 }
@@ -42,6 +49,7 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
   int _generation = 0;
   int _completedCount = 0;
   int _summaryRevision = 0;
+  bool _summaryOpening = false;
   final Set<String> _sessionEventIds = {};
   StudySessionSummary? _sessionSummary;
 
@@ -60,29 +68,35 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
   }
 
   Future<void> _load({int? preferSenseId}) async {
+    if (!mounted) return;
     final generation = ++_generation;
     final deps = widget.dependencies;
     _timer?.cancel();
+    if (_item == null && !_loading) {
+      setState(() => _loading = true);
+    }
     try {
-      final status = widget.todayPlan
+      final status = widget.queueStatusLoader != null
+          ? await widget.queueStatusLoader!()
+          : widget.todayPlan
           ? await deps.repository.queueStatus(todayPlan: true)
           : await deps.repository.queueStatus(
               wordbookId: widget.wordbookId,
               senseId: widget.senseId,
             );
       final matches = status.items;
+      final preferredId = preferSenseId ?? _item?.sense.id;
       final next = matches.isEmpty
           ? null
-          : preferSenseId == null
+          : preferredId == null
           ? matches.first
           : matches.firstWhere(
-              (item) => item.sense.id == preferSenseId,
+              (item) => item.sense.id == preferredId,
               orElse: () => matches.first,
             );
       if (!mounted || generation != _generation) return;
       setState(() {
-        if (_item?.sense.id != next?.sense.id ||
-            _item?.memory != next?.memory) {
+        if (!_sameStudyItem(_item, next)) {
           _revealed = false;
           _eventId = newReviewEventId();
           _shownAt = deps.nowUtc();
@@ -116,7 +130,8 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
   }
 
   Future<void> _rate(fsrs.Rating rating) async {
-    if (_busy || !_revealed || _item == null) return;
+    if (_busy || _summaryOpening || !_revealed || _item == null) return;
+    _generation++;
     setState(() {
       _busy = true;
       _error = null;
@@ -149,11 +164,24 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
       ids.length == _sessionEventIds.length &&
       ids.every(_sessionEventIds.contains);
 
+  bool _sameStudyItem(StudyItem? a, StudyItem? b) {
+    if (a == null || b == null) return a == b;
+    return a.word.id == b.word.id &&
+        a.word.spelling == b.word.spelling &&
+        a.sense.id == b.sense.id &&
+        a.sense.definition == b.sense.definition &&
+        a.sense.example == b.sense.example &&
+        a.sense.phonetics == b.sense.phonetics &&
+        a.memory == b.memory;
+  }
+
   Future<void> _refreshSessionSummary() async {
     final ids = Set<String>.of(_sessionEventIds);
     final revision = ++_summaryRevision;
     try {
-      final summary = await widget.dependencies.repository.sessionSummary(ids);
+      final summary = widget.sessionSummaryLoader != null
+          ? await widget.sessionSummaryLoader!(ids)
+          : await widget.dependencies.repository.sessionSummary(ids);
       if (!mounted ||
           revision != _summaryRevision ||
           !_sameSessionEvents(ids)) {
@@ -172,7 +200,9 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
 
   Future<void> _undo() async {
     final eventId = _lastUndoEventId;
-    if (eventId == null || _busy || _loading) return;
+    if (eventId == null || _busy || _summaryOpening || _loading) return;
+    _generation++;
+    var wrote = false;
     setState(() {
       _busy = true;
       _error = null;
@@ -181,25 +211,38 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
       final result = await widget.dependencies.repository.undoLastReview(
         eventId,
       );
+      wrote = true;
       _sessionEventIds.remove(eventId);
       _lastUndoEventId = null;
       _completedCount = math.max(0, _completedCount - 1);
       await _refreshSessionSummary();
       _timer?.cancel();
       await _load(preferSenseId: result.wordSenseId);
+      if (mounted && _loadFailed) {
+        setState(() => _error = '评分已撤销，但刷新队列失败：$_error');
+        return;
+      }
       if (mounted && _item?.sense.id != result.wordSenseId) {
-        final item = await widget.dependencies.repository.itemBySenseId(
-          result.wordSenseId,
-        );
-        if (item != null && mounted) {
-          setState(() {
-            _item = item;
-            _revealed = false;
-            _eventId = newReviewEventId();
-            _shownAt = widget.dependencies.nowUtc();
-            _loading = false;
-            _loadFailed = false;
-          });
+        try {
+          final item = widget.itemLoader != null
+              ? await widget.itemLoader!(result.wordSenseId)
+              : await widget.dependencies.repository.itemBySenseId(
+                  result.wordSenseId,
+                );
+          if (item != null && mounted) {
+            setState(() {
+              _item = item;
+              _revealed = false;
+              _eventId = newReviewEventId();
+              _shownAt = widget.dependencies.nowUtc();
+              _loading = false;
+              _loadFailed = false;
+            });
+          }
+        } catch (error) {
+          if (mounted) {
+            setState(() => _error = '评分已撤销，但读取原词失败：$error');
+          }
         }
       }
     } on UndoUnavailable catch (error) {
@@ -211,7 +254,9 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
       }
     } catch (error) {
       if (mounted) {
-        setState(() => _error = '撤销失败，记忆状态未变：$error');
+        setState(
+          () => _error = wrote ? '评分已撤销，但刷新当前词失败：$error' : '撤销失败，记忆状态未变：$error',
+        );
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -219,40 +264,47 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
   }
 
   Future<void> _openSummary() async {
-    await _refreshSessionSummary();
-    if (!mounted) return;
-    final endRound = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('本轮学习小结'),
-          content: SingleChildScrollView(
-            child: SizedBox(
-              width: math.min(520, MediaQuery.sizeOf(context).width - 96),
-              child: _summaryContent(
-                context,
-                onRetry: () async {
-                  await _refreshSessionSummary();
-                  if (context.mounted) setDialogState(() {});
-                },
+    if (_summaryOpening) return;
+    setState(() => _summaryOpening = true);
+    try {
+      await _refreshSessionSummary();
+      if (!mounted) return;
+      final response = DialogResponse<bool>();
+      final endRound = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('本轮学习小结'),
+            content: SingleChildScrollView(
+              child: SizedBox(
+                width: math.min(520, MediaQuery.sizeOf(context).width - 96),
+                child: _summaryContent(
+                  context,
+                  onRetry: () async {
+                    await _refreshSessionSummary();
+                    if (context.mounted) setDialogState(() {});
+                  },
+                ),
               ),
             ),
+            actions: [
+              TextButton(
+                onPressed: () => response.close(dialogContext, false),
+                child: const Text('继续学习'),
+              ),
+              if (_item != null)
+                FilledButton(
+                  onPressed: () => response.close(dialogContext, true),
+                  child: const Text('结束本轮并返回'),
+                ),
+            ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('继续学习'),
-            ),
-            if (_item != null)
-              FilledButton(
-                onPressed: () => Navigator.of(dialogContext).pop(true),
-                child: const Text('结束本轮并返回'),
-              ),
-          ],
         ),
-      ),
-    );
-    if (endRound == true && mounted) Navigator.of(context).pop();
+      );
+      if (endRound == true && mounted) Navigator.of(context).pop();
+    } finally {
+      if (mounted) setState(() => _summaryOpening = false);
+    }
   }
 
   Widget _summaryContent(BuildContext context, {VoidCallback? onRetry}) {
@@ -331,6 +383,7 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
     if (event is! KeyDownEvent ||
         _loading ||
         _busy ||
+        _summaryOpening ||
         clockMovedBack ||
         _error != null) {
       return KeyEventResult.ignored;
@@ -454,7 +507,9 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
           actions: [
             IconButton(
               tooltip: '本轮小结',
-              onPressed: _loading || _busy ? null : _openSummary,
+              onPressed: _loading || _busy || _summaryOpening
+                  ? null
+                  : _openSummary,
               icon: const JournalIcon(Icons.insights_outlined, size: 21),
             ),
           ],
@@ -517,7 +572,7 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
                         switchOutCurve: Curves.easeInCubic,
                         child: JournalSurface(
                           key: ValueKey(
-                            '${item.sense.id}-${item.memory?.due ?? 'new'}',
+                            '${item.sense.id}|${item.word.spelling}|${item.sense.definition.hashCode}|${item.memory?.due ?? 'new'}',
                           ),
                           variant: JournalSurfaceVariant.elevated,
                           padding: EdgeInsets.symmetric(
@@ -621,7 +676,9 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
                       if (!_revealed)
                         Center(
                           child: FilledButton(
-                            onPressed: () => setState(() => _revealed = true),
+                            onPressed: _summaryOpening
+                                ? null
+                                : () => setState(() => _revealed = true),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
@@ -663,7 +720,7 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
                                         shortcut: wide ? entry.shortcut : null,
                                         highlighted:
                                             entry.rating == fsrs.Rating.good,
-                                        onPressed: _busy
+                                        onPressed: _busy || _summaryOpening
                                             ? null
                                             : () => _rate(entry.rating),
                                       ),
@@ -709,7 +766,7 @@ class _StudyPageState extends State<StudyPage> with WidgetsBindingObserver {
                           alignment: Alignment.centerLeft,
                           child: OutlinedButton.icon(
                             key: const ValueKey('undo-last-score'),
-                            onPressed: _busy ? null : _undo,
+                            onPressed: _busy || _summaryOpening ? null : _undo,
                             icon: const JournalIcon(Icons.arrow_back, size: 17),
                             label: const Text('撤销上一评分'),
                           ),

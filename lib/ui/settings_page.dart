@@ -6,6 +6,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../app.dart';
 import '../core/theme_settings.dart';
+import '../data/backup_codec.dart';
 import 'common.dart';
 import 'journal_style.dart';
 
@@ -28,6 +29,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _busy = false;
   String? _message;
   bool _messageIsError = false;
+  bool _goalDirty = false;
+  int _goalInputRevision = 0;
+  int _goalLoadRevision = 0;
 
   static const _goalPresets = [0, 10, 20, 30];
 
@@ -52,14 +56,22 @@ class _SettingsPageState extends State<SettingsPage> {
     _readGoal();
   }
 
-  Future<void> _readGoal() async {
+  Future<void> _readGoal({bool force = false}) async {
+    final loadRevision = ++_goalLoadRevision;
+    final inputRevision = _goalInputRevision;
     try {
       final goal = await widget.dependencies.repository.dailyGoal();
-      if (mounted && _goal.text != '$goal') {
-        setState(() => _goal.text = '$goal');
+      if (!mounted || loadRevision != _goalLoadRevision) return;
+      final canApply =
+          force || (!_goalDirty && inputRevision == _goalInputRevision);
+      if (canApply) {
+        setState(() {
+          _goal.text = '$goal';
+          _goalDirty = false;
+        });
       }
     } catch (error) {
-      if (mounted) {
+      if (mounted && loadRevision == _goalLoadRevision) {
         setState(() {
           _message = '$error';
           _messageIsError = true;
@@ -76,6 +88,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _perform(Future<String?> Function() task) async {
+    if (_busy) return;
     setState(() {
       _busy = true;
       _message = null;
@@ -92,7 +105,8 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (error) {
       if (mounted) {
         setState(() {
-          _message = '操作未完成：$error';
+          final detail = error is FormatException ? error.message : '$error';
+          _message = '操作未完成：$detail';
           _messageIsError = true;
         });
       }
@@ -124,23 +138,61 @@ class _SettingsPageState extends State<SettingsPage> {
     );
     if (picked == null) return null;
     final bytes = await picked.readAsBytes();
-    final source = utf8.decode(bytes);
+    final String source;
+    try {
+      source = utf8.decode(bytes);
+    } on FormatException {
+      throw const FormatException('备份文件不是有效的 UTF-8 文本。');
+    }
     if (!mounted) return null;
+    final BackupPreview preview;
+    try {
+      preview = await widget.dependencies.backup.preview(source);
+    } on FormatException catch (error) {
+      throw FormatException('备份校验失败：${error.message}');
+    }
+    if (!mounted) return null;
+    final response = DialogResponse<bool>();
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('恢复备份会替换当前进度'),
-        content: Text(
-          '将读取「${picked.name}」。校验通过后替换本机的词书、设置和学习记录；校验或写入失败会保留当前数据。',
+        constraints: const BoxConstraints(maxWidth: 560),
+        title: const Text('恢复备份会替换当前数据'),
+        content: SingleChildScrollView(
+          key: const ValueKey('backup-preview-scroll'),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('文件：${picked.name}'),
+              const SizedBox(height: 12),
+              const Text('备份校验通过。'),
+              const SizedBox(height: 8),
+              Text('备份时间：${localDateTimeWithYearLabel(preview.exportedAt)}'),
+              Text('词书：${preview.wordbookCount} 本'),
+              Text('词义：${preview.senseCount} 个'),
+              Text('已学词义：${preview.learnedSenseCount} 个'),
+              Text('评分记录：${preview.reviewEventCount} 条'),
+              Text('每日新词目标：${preview.dailyGoal} 个'),
+              const SizedBox(height: 12),
+              const Text(
+                '恢复会用备份替换本机的词书、设置和学习记录，不会与现有数据合并。'
+                '离线换机时，请先在当前设备导出，再到另一台设备恢复后继续；'
+                '两台设备各自新增的进度不能合并。',
+              ),
+              const SizedBox(height: 8),
+              const Text('备份文件只在本机读取，不会上传。恢复后，此前页面上的撤销入口会失效。'),
+            ],
+          ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => response.close(context, false),
             child: const Text('取消'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('恢复备份'),
+            onPressed: () => response.close(context, true),
+            child: const Text('确认恢复'),
           ),
         ],
       ),
@@ -149,13 +201,24 @@ class _SettingsPageState extends State<SettingsPage> {
     await widget.dependencies.backup.restore(source);
     await widget.dependencies.reloadTheme();
     widget.dependencies.repository.refresh();
-    await _readGoal();
+    await _readGoal(force: true);
     return '备份已恢复，学习进度已刷新。';
   }
 
   Future<void> _setTheme(ThemeSettings settings) => _perform(() async {
     await widget.dependencies.theme.save(settings);
     return '主题设置已保存。';
+  });
+
+  Future<void> _saveGoal() => _perform(() async {
+    final value = int.tryParse(_goal.text.trim());
+    if (value == null) {
+      throw const FormatException('请输入 0 到 100 之间的整数。');
+    }
+    await widget.dependencies.repository.setDailyGoal(value);
+    _goalLoadRevision++;
+    _goalDirty = false;
+    return '每日目标已保存。';
   });
 
   @override
@@ -339,7 +402,11 @@ class _SettingsPageState extends State<SettingsPage> {
                     selected: currentGoal == preset,
                     onSelected: _busy
                         ? null
-                        : (_) => setState(() => _goal.text = '$preset'),
+                        : (_) => setState(() {
+                            _goal.text = '$preset';
+                            _goalDirty = true;
+                            _goalInputRevision++;
+                          }),
                   );
                 }).toList(),
               ),
@@ -348,25 +415,17 @@ class _SettingsPageState extends State<SettingsPage> {
                 controller: _goal,
                 enabled: !_busy,
                 keyboardType: TextInputType.number,
-                onChanged: (_) => setState(() {}),
+                onChanged: (_) => setState(() {
+                  _goalDirty = true;
+                  _goalInputRevision++;
+                }),
                 decoration: const InputDecoration(labelText: '每天学习的新词义数量'),
               ),
               const SizedBox(height: 16),
               Align(
                 alignment: Alignment.centerLeft,
                 child: FilledButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _perform(() async {
-                          final value = int.tryParse(_goal.text.trim());
-                          if (value == null) {
-                            throw const FormatException('请输入 0 到 100 之间的整数。');
-                          }
-                          await widget.dependencies.repository.setDailyGoal(
-                            value,
-                          );
-                          return '每日目标已保存。';
-                        }),
+                  onPressed: _busy ? null : _saveGoal,
                   child: const Text('保存目标'),
                 ),
               ),
@@ -382,7 +441,8 @@ class _SettingsPageState extends State<SettingsPage> {
               const SectionHeader(title: '备份与恢复'),
               const SizedBox(height: 8),
               Text(
-                '备份包含词书、词义、全部学习记录和设置。建议在换设备前导出。',
+                '备份包含词书、词义、全部学习记录和设置。离线换机时，先在当前设备导出，'
+                '再在另一台设备恢复后继续；恢复是整份替换，不会合并两台设备各自新增的进度。',
                 style: Theme.of(context).textTheme.bodyMedium
                     ?.copyWith(color: tokens.inkSecondary),
               ),

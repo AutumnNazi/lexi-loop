@@ -14,8 +14,11 @@ import 'package:lexi_loop/ui/library_page.dart';
 import 'package:lexi_loop/ui/spelling_practice_page.dart';
 import 'package:lexi_loop/ui/stats_page.dart';
 import 'package:lexi_loop/ui/study_page.dart';
+import 'package:lexi_loop/ui/today_page.dart';
+import 'package:lexi_loop/ui/word_detail_page.dart';
 import 'package:lexi_loop/ui/memory_curve_chart.dart';
 import 'package:lexi_loop/ui/journal_style.dart';
+import 'package:lexi_loop/ui/common.dart';
 
 void main() {
   late AppDependencies dependencies;
@@ -1175,6 +1178,561 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('拼写不知道会记入错词一次且不写库，320 宽大字号可用', (tester) async {
+    await surface(tester, width: 320, scale: 1.5);
+    final bloom = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    );
+    await dependencies.repository.createWordbook('不知道练习', {
+      bloom.single.sense.id,
+    });
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: SpellingPracticePage(
+          dependencies: dependencies,
+          wordbookId: book.id,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('不知道，查看答案'), findsOneWidget);
+    await tester.ensureVisible(find.text('不知道，查看答案'));
+    await tester.tap(find.text('不知道，查看答案'));
+    await tester.pumpAndSettle();
+    expect(find.text('答对了！'), findsNothing);
+    expect(find.text('正确答案：bloom'), findsOneWidget);
+    await tester.ensureVisible(find.text('查看本轮成绩'));
+    await tester.tap(find.text('查看本轮成绩'));
+    await tester.pumpAndSettle();
+    expect(find.text('本轮错词'), findsOneWidget);
+    expect(find.text('仅重练错词'), findsOneWidget);
+    expect(await dependencies.repository.history(), isEmpty);
+    expect(
+      await dependencies.database
+          .select(dependencies.database.memoryStates)
+          .get(),
+      isEmpty,
+    );
+    await tester.tap(find.text('仅重练错词'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('第 1 / 1 题'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('拼写草稿与已答返回会确认，取消保留题号答案和错词', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final bloom = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    );
+    final wander = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'wander',
+    );
+    await dependencies.repository.createWordbook('返回确认', {
+      bloom.single.sense.id,
+      wander.single.sense.id,
+    });
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => SpellingPracticePage(
+                      dependencies: dependencies,
+                      wordbookId: book.id,
+                    ),
+                  ),
+                ),
+                child: const Text('打开拼写练习'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开拼写练习'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'wrong');
+    await tester.ensureVisible(find.text('检查答案'));
+    await tester.tap(find.text('检查答案'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('下一题'));
+    await tester.tap(find.text('下一题'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('第 2 / 2 题'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'draft');
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本轮拼写练习？'), findsOneWidget);
+    await tester.tap(find.text('继续练习'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('第 2 / 2 题'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'draft',
+    );
+
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本轮拼写练习？'), findsOneWidget);
+    await tester.tap(find.text('继续练习'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('第 2 / 2 题'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'draft',
+    );
+
+    await tester.enterText(find.byType(TextField), 'wrong-again');
+    await tester.ensureVisible(find.text('检查答案'));
+    await tester.tap(find.text('检查答案'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('查看本轮成绩'));
+    await tester.tap(find.text('查看本轮成绩'));
+    await tester.pumpAndSettle();
+    expect(find.text('本轮错词'), findsOneWidget);
+    expect(find.byKey(const ValueKey('retry-wrong-spelling')), findsOneWidget);
+    expect(await dependencies.repository.history(), isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('拼写未开始和完成态返回不弹确认', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final bloom = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    );
+    await dependencies.repository.createWordbook('完成返回', {
+      bloom.single.sense.id,
+    });
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    Widget host() => MaterialApp(
+      theme: journalTheme(Brightness.light),
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: Center(
+            child: TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => SpellingPracticePage(
+                    dependencies: dependencies,
+                    wordbookId: book.id,
+                  ),
+                ),
+              ),
+              child: const Text('打开拼写练习'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(host());
+    await tester.tap(find.text('打开拼写练习'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本轮拼写练习？'), findsNothing);
+    expect(find.text('打开拼写练习'), findsOneWidget);
+
+    await tester.tap(find.text('打开拼写练习'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'bloom');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('查看本轮成绩'));
+    await tester.tap(find.text('查看本轮成绩'));
+    await tester.pumpAndSettle();
+    expect(find.text('拼写练习完成'), findsOneWidget);
+    await tester.ensureVisible(find.text('返回'));
+    await tester.tap(find.text('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本轮拼写练习？'), findsNothing);
+    expect(find.text('打开拼写练习'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('拼写已答一题后下一题空输入返回仍确认', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final bloom = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    );
+    final wander = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'wander',
+    );
+    await dependencies.repository.createWordbook('已答返回', {
+      bloom.single.sense.id,
+      wander.single.sense.id,
+    });
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => SpellingPracticePage(
+                      dependencies: dependencies,
+                      wordbookId: book.id,
+                    ),
+                  ),
+                ),
+                child: const Text('打开拼写练习'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开拼写练习'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'wrong');
+    await tester.ensureVisible(find.text('检查答案'));
+    await tester.tap(find.text('检查答案'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('下一题'));
+    await tester.tap(find.text('下一题'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('第 2 / 2 题'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      isEmpty,
+    );
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本轮拼写练习？'), findsOneWidget);
+    await tester.tap(find.text('继续练习'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('第 2 / 2 题'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本轮拼写练习？'), findsOneWidget);
+    await tester.tap(find.text('放弃并返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('打开拼写练习'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('拼写 Enter 先检查，检查后进入下一题且不连跳', (tester) async {
+    await surface(tester, width: 1280, scale: 1.0);
+    final bloom = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    );
+    final wander = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'wander',
+    );
+    await dependencies.repository.createWordbook('键盘练习', {
+      bloom.single.sense.id,
+      wander.single.sense.id,
+    });
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: SpellingPracticePage(
+          dependencies: dependencies,
+          wordbookId: book.id,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'wrong');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('第 1 / 2 题'), findsOneWidget);
+    expect(find.textContaining('正确答案：'), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField)).readOnly, isTrue);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyRepeatEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('第 2 / 2 题'), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField)).readOnly, isFalse);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      isEmpty,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('第 2 / 2 题'), findsOneWidget);
+    expect(find.text('拼写练习完成'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('拼写调整范围与题量，取消保留，改配置后重开', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final items = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      limit: 2,
+    );
+    final calls = <({EntryFilter filter, int limit})>[];
+    Future<List<StudyItem>> loader(
+      String? wordbookId,
+      EntryFilter filter,
+      int limit,
+    ) async {
+      calls.add((filter: filter, limit: limit));
+      return items;
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: SpellingPracticePage(
+          dependencies: dependencies,
+          wordbookId: 'everyday',
+          spellingLoader: loader,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('当前词书 · 全部 · 每轮 10 词'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'draft');
+    final options = find.byKey(const ValueKey('spelling-options'));
+    await tester.ensureVisible(options);
+    await tester.tap(options);
+    await tester.pumpAndSettle();
+    expect(find.text('调整拼写练习'), findsOneWidget);
+    expect(find.text('保留当前练习'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('spelling-options-apply')));
+    await tester.pumpAndSettle();
+    expect(calls, hasLength(1));
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'draft',
+    );
+
+    await tester.tap(options);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('spelling-count-5')));
+    await tester.pump();
+    expect(find.textContaining('应用新选项会放弃当前题号'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('spelling-options-cancel')));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'draft',
+    );
+    expect(find.text('当前词书 · 全部 · 每轮 10 词'), findsOneWidget);
+
+    await tester.ensureVisible(options);
+    await tester.tap(options);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('spelling-filter-learned')));
+    await tester.tap(find.byKey(const ValueKey('spelling-count-5')));
+    await tester.tap(find.byKey(const ValueKey('spelling-options-apply')));
+    await tester.pumpAndSettle();
+    expect(calls.last.filter, EntryFilter.learned);
+    expect(calls.last.limit, 5);
+    expect(find.text('当前词书 · 已学 · 每轮 5 词'), findsOneWidget);
+    expect(find.textContaining('第 1 / 2 题'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      isEmpty,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('拼写读取失败后可调整范围并显示空结果', (tester) async {
+    await surface(tester, width: 320, scale: 1.5);
+    var fail = true;
+    final calls = <({EntryFilter filter, int limit})>[];
+    Future<List<StudyItem>> loader(
+      String? wordbookId,
+      EntryFilter filter,
+      int limit,
+    ) async {
+      calls.add((filter: filter, limit: limit));
+      if (fail) throw StateError('拼写抽词失败');
+      return const [];
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: SpellingPracticePage(
+          dependencies: dependencies,
+          wordbookId: 'everyday',
+          spellingLoader: loader,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('暂时无法读取拼写题目'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('spelling-options-error')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('spelling-filter-due')));
+    await tester.tap(find.byKey(const ValueKey('spelling-count-20')));
+    fail = false;
+    await tester.tap(find.byKey(const ValueKey('spelling-options-apply')));
+    await tester.pumpAndSettle();
+    expect(calls.last.filter, EntryFilter.due);
+    expect(calls.last.limit, 20);
+    expect(find.text('当前范围没有可练习的词'), findsOneWidget);
+    expect(find.textContaining('暂时没有到期词义'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('spelling-options-empty')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('拼写继续练习同帧重复回调仍保留当前草稿', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final bloom = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    );
+    final wander = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'wander',
+    );
+    await dependencies.repository.createWordbook('重复继续练习', {
+      bloom.single.sense.id,
+      wander.single.sense.id,
+    });
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await tester.pumpWidget(spellingPracticeHost(dependencies, book.id));
+    await tester.tap(find.text('进入二级'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开拼写练习'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'draft');
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃本轮拼写练习？'), findsOneWidget);
+    final callback = tester
+        .widget<TextButton>(find.widgetWithText(TextButton, '继续练习'))
+        .onPressed!;
+    callback();
+    callback();
+    await tester.pumpAndSettle();
+    expect(find.text('打开拼写练习'), findsNothing);
+    expect(find.textContaining('第 1 / 2 题'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'draft',
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('拼写完成态返回同帧重复回调只退一层', (tester) async {
+    await surface(tester, width: 1280, scale: 1.0);
+    final bloom = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    );
+    await dependencies.repository.createWordbook('完成态单层返回', {
+      bloom.single.sense.id,
+    });
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await tester.pumpWidget(spellingPracticeHost(dependencies, book.id));
+    await tester.tap(find.text('进入二级'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开拼写练习'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'bloom');
+    await tester.tap(find.text('检查答案'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('查看本轮成绩'));
+    await tester.tap(find.text('查看本轮成绩'));
+    await tester.pumpAndSettle();
+    expect(find.text('拼写练习完成'), findsOneWidget);
+    final callback = tester
+        .widget<TextButton>(find.widgetWithText(TextButton, '返回'))
+        .onPressed!;
+    callback();
+    callback();
+    await tester.pumpAndSettle();
+    expect(find.text('打开拼写练习'), findsOneWidget);
+    expect(find.text('进入二级'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  for (final layout in [
+    (width: 320.0, scale: 1.5, brightness: Brightness.light),
+    (width: 390.0, scale: 1.5, brightness: Brightness.dark),
+    (width: 1280.0, scale: 1.0, brightness: Brightness.light),
+  ]) {
+    testWidgets(
+      '拼写调整弹框在 ${layout.width} 宽 ${layout.scale} 倍字号 ${layout.brightness.name} 下不溢出',
+      (tester) async {
+        await surface(tester, width: layout.width, scale: layout.scale);
+        final items = await dependencies.repository.entries(
+          wordbookId: 'everyday',
+          limit: 1,
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: journalTheme(layout.brightness),
+            home: SpellingPracticePage(
+              dependencies: dependencies,
+              wordbookId: 'everyday',
+              spellingLoader: (_, _, _) async => items,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final options = find.byKey(const ValueKey('spelling-options'));
+        await tester.ensureVisible(options);
+        await tester.tap(options);
+        await tester.pumpAndSettle();
+        expect(find.text('调整拼写练习'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('spelling-options-cancel')),
+          findsOneWidget,
+        );
+        await tester.tap(find.byKey(const ValueKey('spelling-options-cancel')));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+
   testWidgets('目标为零且额度耗尽时说明仅复习，并显示未来复习时间', (tester) async {
     await surface(tester);
     final target = (await dependencies.repository.entries(
@@ -1689,4 +2247,789 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });
+
+  testWidgets('词义详情到期自动解锁复习，并显示有界最近记录', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final bloom = (await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    )).single;
+    final start = now;
+    final card = await dependencies.repository.score(
+      bloom,
+      fsrs.Rating.good,
+      eventId: newReviewEventId(),
+      durationMs: 1500,
+    );
+    final event = (await dependencies.repository.history(
+      senseId: bloom.sense.id,
+    )).single;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: WordDetailPage(dependencies: dependencies, wordId: bloom.word.id),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final review = find.widgetWithText(FilledButton, '复习这个词义');
+    expect(review, findsOneWidget);
+    expect(tester.widget<FilledButton>(review).onPressed, isNull);
+
+    now = card.due;
+    await tester.pump(card.due.difference(start) + const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilledButton>(review).onPressed, isNotNull);
+    expect(find.text('最近 20 条'), findsWidgets);
+    expect(find.textContaining('Good · 记得'), findsOneWidget);
+    expect(find.textContaining('耗时 1 秒'), findsOneWidget);
+    expect(find.textContaining('下次安排'), findsOneWidget);
+    expect(
+      find.textContaining(
+        localDateTimeWithYearLabel(
+          DateTime.fromMillisecondsSinceEpoch(event.reviewedAt, isUtc: true),
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('词义详情刷新失败可重试且不显示旧记录', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final bloom = (await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    )).single;
+    await dependencies.repository.score(
+      bloom,
+      fsrs.Rating.good,
+      eventId: newReviewEventId(),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: WordDetailPage(dependencies: dependencies, wordId: bloom.word.id),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Good · 记得'), findsOneWidget);
+
+    await dependencies.database.customStatement(
+      'ALTER TABLE review_events RENAME TO review_events_hold',
+    );
+    addTearDown(() async {
+      try {
+        await dependencies.database.customStatement(
+          'ALTER TABLE review_events_hold RENAME TO review_events',
+        );
+      } catch (_) {}
+    });
+    dependencies.repository.refresh();
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('暂时无法读取数据'), findsOneWidget);
+    expect(find.textContaining('Good · 记得'), findsNothing);
+
+    await dependencies.database.customStatement(
+      'ALTER TABLE review_events_hold RENAME TO review_events',
+    );
+    await tester.ensureVisible(find.text('重试'));
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+    expect(find.text('暂时无法读取数据'), findsNothing);
+    expect(find.textContaining('Good · 记得'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('词义详情切换 wordId 会立即清空旧内容', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final bloom = (await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    )).single;
+    final wander = (await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'wander',
+    )).single;
+
+    Widget page(int wordId) => MaterialApp(
+      theme: journalTheme(Brightness.light),
+      home: WordDetailPage(dependencies: dependencies, wordId: wordId),
+    );
+
+    await tester.pumpWidget(page(bloom.word.id));
+    await tester.pumpAndSettle();
+    expect(find.text('bloom'), findsOneWidget);
+
+    await tester.pumpWidget(page(wander.word.id));
+    expect(find.text('bloom'), findsNothing);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    await tester.pumpAndSettle();
+    expect(find.text('wander'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('词义详情应用回前台会刷新并可重试', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final bloom = (await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    )).single;
+    await dependencies.repository.score(
+      bloom,
+      fsrs.Rating.good,
+      eventId: newReviewEventId(),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: WordDetailPage(dependencies: dependencies, wordId: bloom.word.id),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Good · 记得'), findsOneWidget);
+
+    await dependencies.database.customStatement(
+      'ALTER TABLE review_events RENAME TO review_events_hold',
+    );
+    addTearDown(() async {
+      try {
+        await dependencies.database.customStatement(
+          'ALTER TABLE review_events_hold RENAME TO review_events',
+        );
+      } catch (_) {}
+    });
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('暂时无法读取数据'), findsOneWidget);
+    expect(find.textContaining('Good · 记得'), findsNothing);
+
+    await dependencies.database.customStatement(
+      'ALTER TABLE review_events_hold RENAME TO review_events',
+    );
+    await tester.ensureVisible(find.text('重试'));
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Good · 记得'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('首页词书保存成功但刷新失败会准确提示并可重试', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: Scaffold(body: TodayPage(dependencies: dependencies)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await dependencies.database.customStatement(
+      'ALTER TABLE memory_states RENAME TO memory_states_hold',
+    );
+    addTearDown(() async {
+      try {
+        await dependencies.database.customStatement(
+          'ALTER TABLE memory_states_hold RENAME TO memory_states',
+        );
+      } catch (_) {}
+    });
+
+    final selector = find.byKey(const ValueKey('active-wordbook-selector'));
+    await tester.ensureVisible(selector);
+    await tester.tap(selector);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('大学英语四级').last);
+    await tester.pumpAndSettle();
+
+    expect((await dependencies.repository.activeWordbook())?.id, 'cet4');
+    expect(find.text('词书已切换，但刷新失败'), findsOneWidget);
+    expect(find.textContaining('词书已切换，但刷新失败：'), findsOneWidget);
+    expect(find.textContaining('未能切换词书'), findsNothing);
+    expect(find.text('重试'), findsOneWidget);
+
+    await dependencies.database.customStatement(
+      'ALTER TABLE memory_states_hold RENAME TO memory_states',
+    );
+    await tester.ensureVisible(find.text('重试'));
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+    expect(find.text('暂时无法读取数据'), findsNothing);
+    expect(find.textContaining('未能切换词书'), findsNothing);
+    expect(tester.widget<DropdownButton<String>>(selector).value, 'cet4');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('320 大字号详情最近记录标题与条数分行', (tester) async {
+    await surface(tester, width: 320, scale: 1.5);
+    final bloom = (await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      search: 'bloom',
+    )).single;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: WordDetailPage(dependencies: dependencies, wordId: bloom.word.id),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final title = find.text('最近学习记录').first;
+    final badge = find.text('最近 20 条').first;
+    expect(
+      tester.getTopLeft(badge).dy,
+      greaterThanOrEqualTo(tester.getBottomLeft(title).dy),
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('统计活动默认近 7 天并可切换 30/90 天查看日期与次数', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final calendar = dependencies.repository.calendar;
+    Future<void> insertReview(DateTime at, String rating) => dependencies
+        .database
+        .into(dependencies.database.reviewEvents)
+        .insert(
+          ReviewEventsCompanion.insert(
+            id: newReviewEventId(),
+            userId: localUserId,
+            wordSenseId: 1,
+            trainingMode: recognitionMode,
+            reviewedAt: at.millisecondsSinceEpoch,
+            rating: rating,
+            schedulerVersion: dependencies.engine.schedulerVersion,
+            beforeJson: '{}',
+            afterJson: '{}',
+          ),
+        );
+    for (final day in [
+      (0, 'good'),
+      (-1, 'hard'),
+      (-20, 'easy'),
+      (-65, 'good'),
+    ]) {
+      await insertReview(
+        calendar
+            .midnightUtc(now, daysAhead: day.$1)
+            .add(const Duration(hours: 12)),
+        day.$2,
+      );
+    }
+    final signal = ValueNotifier<int>(0);
+    addTearDown(signal.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: Scaffold(
+          body: StatsPage(
+            dependencies: dependencies,
+            refreshListenable: signal,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final seven = find.byKey(const ValueKey('stats-activity-period-7'));
+    final thirty = find.byKey(const ValueKey('stats-activity-period-30'));
+    final ninety = find.byKey(const ValueKey('stats-activity-period-90'));
+    expect(seven, findsOneWidget);
+    expect(thirty, findsOneWidget);
+    expect(ninety, findsOneWidget);
+    expect(tester.widget<ChoiceChip>(seven).selected, isTrue);
+    expect(find.byKey(const ValueKey('stats-activity-bars')), findsOneWidget);
+    expect(textAtKey(tester, 'stats-activity-rating-count'), '2');
+    expect(textAtKey(tester, 'stats-activity-active-days'), '2');
+    expect(textAtKey(tester, 'stats-activity-success-rate'), '50%');
+
+    await tester.ensureVisible(thirty);
+    await tester.tap(thirty);
+    await tester.pumpAndSettle();
+    expect(tester.widget<ChoiceChip>(thirty).selected, isTrue);
+    expect(find.byKey(const ValueKey('stats-activity-grid')), findsOneWidget);
+    expect(textAtKey(tester, 'stats-activity-rating-count'), '3');
+    expect(textAtKey(tester, 'stats-activity-active-days'), '3');
+    expect(textAtKey(tester, 'stats-activity-success-rate'), '67%');
+
+    signal.value++;
+    await tester.pumpAndSettle();
+    expect(tester.widget<ChoiceChip>(thirty).selected, isTrue);
+    expect(find.byKey(const ValueKey('stats-activity-grid')), findsOneWidget);
+
+    final twentyDaysAgo = calendar.local(
+      calendar.midnightUtc(now, daysAhead: -20),
+    );
+    final dayCell = find.byKey(
+      ValueKey(
+        'activity-day-${twentyDaysAgo.year}-${twentyDaysAgo.month}-${twentyDaysAgo.day}',
+      ),
+    );
+    await tester.ensureVisible(dayCell);
+    await tester.tap(dayCell);
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        '${twentyDaysAgo.year} 年 ${twentyDaysAgo.month} 月 ${twentyDaysAgo.day} 日',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('1 次评分'), findsOneWidget);
+    await tester.tap(find.text('关闭'));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(ninety);
+    await tester.tap(ninety);
+    await tester.pumpAndSettle();
+    expect(tester.widget<ChoiceChip>(ninety).selected, isTrue);
+    expect(textAtKey(tester, 'stats-activity-rating-count'), '4');
+    expect(textAtKey(tester, 'stats-activity-active-days'), '4');
+    expect(textAtKey(tester, 'stats-activity-success-rate'), '75%');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('统计活动零记录时成功率显示破折号', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: Scaffold(body: StatsPage(dependencies: dependencies)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(textAtKey(tester, 'stats-activity-rating-count'), '0');
+    expect(textAtKey(tester, 'stats-activity-active-days'), '0');
+    expect(textAtKey(tester, 'stats-activity-success-rate'), '—');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('统计活动快速切换时旧异步结果不覆盖新期间', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final thirty = Completer<ReviewActivity>();
+    final ninety = Completer<ReviewActivity>();
+    Future<ReviewActivity> load(int days, DateTime asOf) {
+      if (days == 7) {
+        return Future.value(
+          activityFixture(7, ratingCount: 7, goodEasyCount: 7),
+        );
+      }
+      return days == 30 ? thirty.future : ninety.future;
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: Scaffold(
+          body: StatsPage(dependencies: dependencies, activityLoader: load),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final thirtyChip = find.byKey(const ValueKey('stats-activity-period-30'));
+    final ninetyChip = find.byKey(const ValueKey('stats-activity-period-90'));
+    expect(thirtyChip, findsOneWidget);
+    expect(ninetyChip, findsOneWidget);
+    await tester.ensureVisible(thirtyChip);
+    await tester.tap(thirtyChip);
+    await tester.pump();
+    await tester.ensureVisible(ninetyChip);
+    await tester.tap(ninetyChip);
+    await tester.pump();
+
+    ninety.complete(activityFixture(90, ratingCount: 90, goodEasyCount: 90));
+    await tester.pumpAndSettle();
+    thirty.complete(activityFixture(30, ratingCount: 30, goodEasyCount: 30));
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<ChoiceChip>(ninetyChip).selected, isTrue);
+    expect(textAtKey(tester, 'stats-activity-rating-count'), '90');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('统计活动读取失败清空旧数据，重试保留所选期间', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    var fail = false;
+    Future<ReviewActivity> load(int days, DateTime asOf) async {
+      if (fail) throw StateError('activity failure');
+      return activityFixture(days, ratingCount: days, goodEasyCount: days);
+    }
+
+    final signal = ValueNotifier<int>(0);
+    addTearDown(signal.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: Scaffold(
+          body: StatsPage(
+            dependencies: dependencies,
+            refreshListenable: signal,
+            activityLoader: load,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final thirtyChip = find.byKey(const ValueKey('stats-activity-period-30'));
+    expect(thirtyChip, findsOneWidget);
+    await tester.ensureVisible(thirtyChip);
+    await tester.tap(thirtyChip);
+    await tester.pumpAndSettle();
+    expect(textAtKey(tester, 'stats-activity-rating-count'), '30');
+
+    fail = true;
+    signal.value++;
+    await tester.pumpAndSettle();
+    expect(find.text('暂时无法读取活动回看'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('stats-activity-rating-count')),
+      findsNothing,
+    );
+    expect(tester.widget<ChoiceChip>(thirtyChip).selected, isTrue);
+
+    fail = false;
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('stats-activity-retry')),
+    );
+    await tester.tap(find.byKey(const ValueKey('stats-activity-retry')));
+    await tester.pumpAndSettle();
+    expect(find.text('暂时无法读取活动回看'), findsNothing);
+    expect(tester.widget<ChoiceChip>(thirtyChip).selected, isTrue);
+    expect(textAtKey(tester, 'stats-activity-rating-count'), '30');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  for (final layout in [
+    (width: 320.0, scale: 1.5, brightness: Brightness.light),
+    (width: 390.0, scale: 1.5, brightness: Brightness.dark),
+    (width: 1280.0, scale: 1.0, brightness: Brightness.light),
+  ]) {
+    testWidgets(
+      '统计活动 90 天在 ${layout.width} 宽、${layout.scale} 倍字号、${layout.brightness.name} 下可用',
+      (tester) async {
+        await surface(tester, width: layout.width, scale: layout.scale);
+        Future<ReviewActivity> load(int days, DateTime asOf) async =>
+            activityFixture(days, ratingCount: 90, goodEasyCount: 90);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: journalTheme(layout.brightness),
+            home: Scaffold(
+              body: StatsPage(dependencies: dependencies, activityLoader: load),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final ninety = find.byKey(const ValueKey('stats-activity-period-90'));
+        expect(ninety, findsOneWidget);
+        await tester.ensureVisible(ninety);
+        await tester.tap(ninety);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('stats-activity-grid')),
+          findsOneWidget,
+        );
+        final todayCell = find.byKey(const ValueKey('activity-day-2026-11-27'));
+        await tester.ensureVisible(todayCell);
+        expect(todayCell, findsOneWidget);
+        await tester.tap(todayCell);
+        await tester.pumpAndSettle();
+        expect(find.text('90 次评分'), findsOneWidget);
+        await tester.tap(find.text('关闭'));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+
+  testWidgets('新建词书未保存变化退出确认，同帧输入与两层路由安全', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    await tester.pumpWidget(editorHost(dependencies));
+    await tester.tap(find.text('进入二级'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开编辑'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('打开编辑'), findsOneWidget);
+    await tester.tap(find.text('打开编辑'));
+    await tester.pumpAndSettle();
+
+    final name = find.byKey(const ValueKey('wordbook-name'));
+    await tester.enterText(name, '临时词书名称');
+    // 不先 pump，验证输入事件后的同帧返回也按实时 dirty 判断。
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃未保存的修改？'), findsOneWidget);
+    await tester.tap(find.text('继续编辑'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(name).controller!.text, '临时词书名称');
+
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('放弃并返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('打开编辑'), findsOneWidget);
+    expect(find.text('进入二级'), findsNothing);
+
+    await tester.tap(find.text('打开编辑'));
+    await tester.pumpAndSettle();
+    await tester.enterText(name, '临时名称');
+    await tester.enterText(name, '');
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃未保存的修改？'), findsNothing);
+    expect(find.text('打开编辑'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('编辑词书选词改回基线后返回不弹确认', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    final items = await dependencies.repository.entries(
+      wordbookId: 'everyday',
+      limit: 2,
+    );
+    await dependencies.repository.createWordbook('基线词书', {items[0].sense.id});
+    final book = (await dependencies.repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await tester.pumpWidget(editorHost(dependencies, book: book));
+    await tester.tap(find.text('进入二级'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开编辑'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃未保存的修改？'), findsNothing);
+    expect(find.text('打开编辑'), findsOneWidget);
+    await tester.tap(find.text('打开编辑'));
+    await tester.pumpAndSettle();
+
+    final candidate = find.widgetWithText(
+      CheckboxListTile,
+      items[1].word.spelling,
+    );
+    await tester.ensureVisible(candidate);
+    await tester.tap(candidate);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃未保存的修改？'), findsOneWidget);
+    await tester.tap(find.text('继续编辑'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(candidate);
+    await tester.tap(candidate);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.text('放弃未保存的修改？'), findsNothing);
+    expect(find.text('打开编辑'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('编辑器批量选择只作用于当前页，并在已选末页取消后回落', (tester) async {
+    await surface(tester, width: 320, scale: 1.5);
+    final items = await dependencies.repository.entries(
+      wordbookId: 'cet4',
+      limit: 45,
+    );
+    await dependencies.repository.createWordbook(
+      '批量词书',
+      items.map((item) => item.sense.id).toSet(),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: WordbookEditorPage(dependencies: dependencies),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final source = find.byKey(const ValueKey('wordbook-source'));
+    await tester.ensureVisible(source);
+    await tester.tap(source);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('批量词书').last);
+    await tester.pumpAndSettle();
+
+    final selectPage = find.byKey(const ValueKey('wordbook-select-page'));
+    await tester.ensureVisible(selectPage);
+    expect(tester.widget<TextButton>(selectPage).onPressed, isNotNull);
+    await tester.tap(selectPage);
+    await tester.pumpAndSettle();
+    expect(find.text('已选 40 个词义'), findsOneWidget);
+
+    final next = find.text('下一页');
+    await tester.ensureVisible(next);
+    await tester.tap(next);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(selectPage);
+    await tester.tap(selectPage);
+    await tester.pumpAndSettle();
+    expect(find.text('已选 45 个词义'), findsOneWidget);
+
+    final selectedOnly = find.byKey(const ValueKey('wordbook-selected-only'));
+    await tester.ensureVisible(selectedOnly);
+    await tester.tap(selectedOnly);
+    await tester.pumpAndSettle();
+    expect(find.text('1–40 / 45'), findsOneWidget);
+    await tester.ensureVisible(next);
+    await tester.tap(next);
+    await tester.pumpAndSettle();
+    expect(find.text('41–45 / 45'), findsOneWidget);
+
+    final clearPage = find.byKey(const ValueKey('wordbook-clear-page'));
+    await tester.ensureVisible(clearPage);
+    await tester.tap(clearPage);
+    await tester.pumpAndSettle();
+    expect(find.text('1–40 / 40'), findsOneWidget);
+    expect(find.text('已选 40 个词义'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('新建词书失败保留草稿，修复后连点只创建一本', (tester) async {
+    await surface(tester, width: 390, scale: 1.5);
+    await dependencies.database.customStatement(
+      "CREATE TRIGGER reject_wordbook BEFORE INSERT ON wordbooks "
+      "BEGIN SELECT RAISE(ABORT, 'test create failure'); END",
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: journalTheme(Brightness.light),
+        home: WordbookEditorPage(dependencies: dependencies),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final name = find.byKey(const ValueKey('wordbook-name'));
+    await tester.enterText(name, '失败重试词书');
+    final first = find.byType(CheckboxListTile).first;
+    await tester.ensureVisible(first);
+    await tester.tap(first);
+    await tester.pumpAndSettle();
+    final save = find.widgetWithText(FilledButton, '创建词书（1 个词义）');
+    await tester.ensureVisible(save);
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('test create failure'), findsOneWidget);
+    expect(tester.widget<TextField>(name).controller!.text, '失败重试词书');
+
+    await dependencies.database.customStatement('DROP TRIGGER reject_wordbook');
+    await tester.ensureVisible(save);
+    await tester.tap(save);
+    await tester.tap(save, warnIfMissed: false);
+    await tester.pumpAndSettle();
+    final books = await dependencies.repository.books();
+    expect(
+      books.where((book) => book.name == '失败重试词书' && !book.isBuiltIn),
+      hasLength(1),
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+}
+
+Widget editorHost(AppDependencies dependencies, {Wordbook? book}) {
+  return MaterialApp(
+    theme: journalTheme(Brightness.light),
+    home: Builder(
+      builder: (homeContext) => Scaffold(
+        body: Center(
+          child: TextButton(
+            onPressed: () => Navigator.of(homeContext).push(
+              MaterialPageRoute<void>(
+                builder: (secondContext) => Scaffold(
+                  body: Center(
+                    child: TextButton(
+                      onPressed: () => Navigator.of(secondContext).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => WordbookEditorPage(
+                            dependencies: dependencies,
+                            book: book,
+                          ),
+                        ),
+                      ),
+                      child: const Text('打开编辑'),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            child: const Text('进入二级'),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+Widget spellingPracticeHost(AppDependencies dependencies, String wordbookId) {
+  return MaterialApp(
+    theme: journalTheme(Brightness.light),
+    home: Builder(
+      builder: (homeContext) => Scaffold(
+        body: Center(
+          child: TextButton(
+            onPressed: () => Navigator.of(homeContext).push(
+              MaterialPageRoute<void>(
+                builder: (secondContext) => Scaffold(
+                  body: Center(
+                    child: TextButton(
+                      onPressed: () => Navigator.of(secondContext).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => SpellingPracticePage(
+                            dependencies: dependencies,
+                            wordbookId: wordbookId,
+                          ),
+                        ),
+                      ),
+                      child: const Text('打开拼写练习'),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            child: const Text('进入二级'),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+String? textAtKey(WidgetTester tester, String key) {
+  final finder = find.byKey(ValueKey(key));
+  expect(finder, findsOneWidget);
+  return tester.widget<Text>(finder).data;
+}
+
+ReviewActivity activityFixture(
+  int days, {
+  int ratingCount = 0,
+  int goodEasyCount = 0,
+}) {
+  final last = DateTime.utc(2026, 11, 27);
+  return ReviewActivity(
+    days: days,
+    dayCounts: List.generate(days, (index) {
+      final date = last.subtract(Duration(days: days - 1 - index));
+      return ReviewActivityDay(
+        localDate: DateTime.utc(date.year, date.month, date.day),
+        count: index == days - 1 ? ratingCount : 0,
+      );
+    }),
+    ratingCount: ratingCount,
+    goodEasyCount: goodEasyCount,
+  );
 }

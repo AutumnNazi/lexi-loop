@@ -36,6 +36,7 @@ class _TodayPageState extends State<TodayPage> {
   int _loadRevision = 0;
   bool _savingBook = false;
   String? _bookError;
+  String? _bookRefreshError;
 
   @override
   void initState() {
@@ -79,6 +80,9 @@ class _TodayPageState extends State<TodayPage> {
     );
     if (mounted && revision == _loadRevision) {
       _cached = snapshot;
+      if (_bookRefreshError != null) {
+        setState(() => _bookRefreshError = null);
+      }
     }
     return snapshot;
   }
@@ -102,18 +106,31 @@ class _TodayPageState extends State<TodayPage> {
     setState(() {
       _savingBook = true;
       _bookError = null;
+      _bookRefreshError = null;
+    });
+    final bookId = id == '' ? null : id;
+    try {
+      await widget.dependencies.repository.setActiveWordbook(bookId);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _bookError = '未能切换词书：$error';
+          _savingBook = false;
+        });
+      }
+      return;
+    }
+    if (!mounted) return;
+    final refresh = _load();
+    setState(() {
+      _data = refresh;
     });
     try {
-      await widget.dependencies.repository.setActiveWordbook(
-        id == '' ? null : id,
-      );
-      if (!mounted) return;
-      setState(() {
-        _data = _load();
-      });
-      await _data;
+      await refresh;
     } catch (error) {
-      if (mounted) setState(() => _bookError = '未能切换词书：$error');
+      if (mounted) {
+        setState(() => _bookRefreshError = '词书已切换，但刷新失败：$error');
+      }
     } finally {
       if (mounted) setState(() => _savingBook = false);
     }
@@ -143,8 +160,8 @@ class _TodayPageState extends State<TodayPage> {
           builder: (context, snapshot) {
             if (snapshot.hasError) {
               return MessagePanel(
-                title: '暂时无法读取数据',
-                message: '${snapshot.error}',
+                title: _bookRefreshError == null ? '暂时无法读取数据' : '词书已切换，但刷新失败',
+                message: _bookRefreshError ?? '${snapshot.error}',
                 icon: Icons.error_outline,
                 action: OutlinedButton(
                   onPressed: _onRefreshSignal,

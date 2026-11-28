@@ -169,6 +169,9 @@ void main() {
           await inspect('create-book-results');
           await tester.tap(find.byTooltip('返回'));
           await tester.pumpAndSettle();
+          expect(find.text('放弃未保存的修改？'), findsOneWidget);
+          await tester.tap(find.text('放弃并返回'));
+          await tester.pumpAndSettle();
           final bloom = find.text('bloom').first;
           await tester.ensureVisible(bloom);
           await tester.tap(bloom);

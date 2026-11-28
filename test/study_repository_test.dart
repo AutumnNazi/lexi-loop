@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -499,6 +500,117 @@ void main() {
     );
     expect(await repository.history(), isEmpty);
     expect(await db.select(db.memoryStates).get(), isEmpty);
+  });
+
+  test('拼写按范围先筛选再按单词去重，多义词不会漏掉高 ID 到期释义', () async {
+    const wordId = 900001;
+    const otherWordId = 900010;
+    const lowSense = 900001;
+    const highSense = 900002;
+    const otherSense = 900003;
+    await db
+        .into(db.words)
+        .insert(
+          WordsCompanion.insert(
+            id: const Value(wordId),
+            spelling: 'boundary-word',
+          ),
+        );
+    for (final sense in [
+      (id: lowSense, definition: '低 ID 未学释义'),
+      (id: highSense, definition: '高 ID 到期释义'),
+    ]) {
+      await db
+          .into(db.wordSenses)
+          .insert(
+            WordSensesCompanion.insert(
+              id: Value(sense.id),
+              wordId: wordId,
+              definition: sense.definition,
+              example: '',
+            ),
+          );
+    }
+    await db
+        .into(db.words)
+        .insert(
+          WordsCompanion.insert(
+            id: const Value(otherWordId),
+            spelling: 'other-user-word',
+          ),
+        );
+    await db
+        .into(db.wordSenses)
+        .insert(
+          WordSensesCompanion.insert(
+            id: const Value(otherSense),
+            wordId: otherWordId,
+            definition: '其他用户释义',
+            example: '',
+          ),
+        );
+    final nowMs = now.millisecondsSinceEpoch;
+    MemoryStatesCompanion state(int senseId, String userId, String mode) =>
+        MemoryStatesCompanion.insert(
+          userId: userId,
+          wordSenseId: senseId,
+          trainingMode: mode,
+          state: 1,
+          step: const Value(0),
+          stability: 1,
+          difficulty: 5,
+          due: nowMs,
+          lastReview: nowMs - 1000,
+          schedulerVersion: engine.schedulerVersion,
+          schedulerConfigJson: engine.configurationJson,
+        );
+    await db
+        .into(db.memoryStates)
+        .insert(state(highSense, localUserId, recognitionMode));
+    await db
+        .into(db.memoryStates)
+        .insert(state(otherSense, 'other-user', recognitionMode));
+    await db
+        .into(db.memoryStates)
+        .insert(state(otherSense, localUserId, 'spelling'));
+    await repository.createWordbook('拼写边界', {lowSense, highSense, otherSense});
+    final book = (await repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+
+    final learned = await repository.spellingSample(
+      wordbookId: book.id,
+      filter: EntryFilter.learned,
+      nowMilliseconds: nowMs,
+    );
+    expect(learned, hasLength(1));
+    expect(learned.single.sense.id, highSense);
+    expect(learned.single.sense.definition, '高 ID 到期释义');
+
+    final dueAtBoundary = await repository.spellingSample(
+      wordbookId: book.id,
+      filter: EntryFilter.due,
+      nowMilliseconds: nowMs,
+    );
+    expect(dueAtBoundary.single.sense.id, highSense);
+    expect(
+      await repository.spellingSample(
+        wordbookId: book.id,
+        filter: EntryFilter.due,
+        nowMilliseconds: nowMs - 1,
+      ),
+      isEmpty,
+    );
+
+    final unlearned = await repository.spellingSample(
+      wordbookId: book.id,
+      filter: EntryFilter.unlearned,
+      limit: 10,
+      nowMilliseconds: nowMs,
+    );
+    expect(unlearned.map((item) => item.sense.id), contains(lowSense));
+    expect(unlearned.map((item) => item.sense.id), isNot(contains(highSense)));
+    expect(await repository.history(), isEmpty);
   });
 
   test('默认队列覆盖考试词书，到期卡跨词书去重且不扣减新词额度', () async {
@@ -1329,6 +1441,403 @@ void main() {
     expect(forecast.sevenDayTotal, 3);
     expect(forecast.days.last.count, 0);
   });
+
+  test('history 的 limit 取最新 N 条并按时间升序，默认仍返回全量', () async {
+    final first = (await repository.queue(wordbookId: 'everyday')).first;
+    var current = first;
+    for (var i = 0; i < 25; i++) {
+      final card = await repository.score(
+        current,
+        fsrs.Rating.good,
+        eventId: newReviewEventId(),
+      );
+      now = card.due;
+      current = (await repository.itemBySenseId(first.sense.id))!;
+    }
+
+    final all = await repository.history(senseId: first.sense.id);
+    expect(all, hasLength(25));
+    final limited = await repository.history(
+      senseId: first.sense.id,
+      limit: 20,
+    );
+    expect(limited, hasLength(20));
+    expect(mapHistoryIds(limited), mapHistoryIds(all.skip(5).toList()));
+    for (var i = 0; i < limited.length - 1; i++) {
+      expect(
+        limited[i].reviewedAt,
+        lessThanOrEqualTo(limited[i + 1].reviewedAt),
+      );
+    }
+    expect((await repository.stats(asOf: now)).total, 25);
+  });
+
+  test('活动摘要按本地日历窗口聚合评分、学习天数与成功率', () async {
+    const calendar = LocalCalendar(fixedOffset: Duration(hours: 8));
+    now = DateTime.utc(2026, 1, 1, 15, 59, 59, 999);
+    final activityRepo = StudyRepository(
+      db,
+      engine,
+      nowUtc: () => now,
+      calendar: calendar,
+    );
+    addTearDown(activityRepo.dispose);
+    final start = calendar.midnightUtc(now, daysAhead: -6);
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: start.subtract(const Duration(milliseconds: 1)),
+      rating: 'easy',
+    );
+    await insertReviewRecord(db, engine, reviewedAt: start, rating: 'good');
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: start.add(const Duration(hours: 1)),
+      rating: 'hard',
+    );
+    await insertReviewRecord(db, engine, reviewedAt: now, rating: 'easy');
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: now.add(const Duration(milliseconds: 1)),
+      rating: 'good',
+    );
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: now,
+      rating: 'good',
+      userId: 'other-user',
+    );
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: now,
+      rating: 'good',
+      trainingMode: 'spelling',
+    );
+
+    final activity = await activityRepo.reviewActivity(days: 7, asOf: now);
+    expect(activity.ratingCount, 3);
+    expect(activity.goodEasyCount, 2);
+    expect(activity.activeDays, 2);
+    expect(activity.successRate, closeTo(2 / 3, 1e-9));
+    expect(activity.dayCounts, hasLength(7));
+    expect(activity.dayCounts.first.localDate, DateTime.utc(2025, 12, 26));
+    expect(activity.dayCounts.first.count, 2);
+    expect(activity.dayCounts[1].count, 0);
+    expect(activity.dayCounts.last.localDate, DateTime.utc(2026, 1, 1));
+    expect(activity.dayCounts.last.count, 1);
+
+    final stats = await activityRepo.stats(asOf: now);
+    expect(stats.today, 1);
+    // 累计数保留未来异常记录；近期活动与连击只使用截至 asOf 的窗口。
+    expect(stats.total, 5);
+    expect(stats.successRate, closeTo(4 / 5, 1e-9));
+    expect(stats.dailyCounts.first, 2);
+    expect(stats.dailyCounts.last, 1);
+    expect(stats.recentSuccessRate, closeTo(2 / 3, 1e-9));
+    expect(stats.streak, 1);
+  });
+
+  test('空白活动返回零值与空成功率', () async {
+    final activity = await repository.reviewActivity(days: 30, asOf: now);
+    expect(activity.ratingCount, 0);
+    expect(activity.goodEasyCount, 0);
+    expect(activity.activeDays, 0);
+    expect(activity.successRate, isNull);
+    expect(activity.dayCounts, hasLength(30));
+    expect(activity.dayCounts.every((day) => day.count == 0), isTrue);
+
+    final stats = await repository.stats(asOf: now);
+    expect(stats.total, 0);
+    expect(stats.today, 0);
+    expect(stats.successRate, 0);
+    expect(stats.recentSuccessRate, 0);
+    expect(stats.streak, 0);
+    expect(stats.dailyCounts, List<int>.filled(7, 0));
+  });
+
+  test('近 90 天窗口跨月跨年并支持负本地 offset', () async {
+    const calendar = LocalCalendar(fixedOffset: Duration(hours: -5));
+    now = DateTime.utc(2026, 1, 1, 6);
+    final activityRepo = StudyRepository(
+      db,
+      engine,
+      nowUtc: () => now,
+      calendar: calendar,
+    );
+    addTearDown(activityRepo.dispose);
+    final start = calendar.midnightUtc(now, daysAhead: -89);
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: start.subtract(const Duration(milliseconds: 1)),
+      rating: 'good',
+    );
+    await insertReviewRecord(db, engine, reviewedAt: start, rating: 'good');
+    await insertReviewRecord(db, engine, reviewedAt: now, rating: 'hard');
+
+    final activity = await activityRepo.reviewActivity(days: 90, asOf: now);
+    expect(activity.ratingCount, 2);
+    expect(activity.goodEasyCount, 1);
+    expect(activity.activeDays, 2);
+    expect(activity.dayCounts, hasLength(90));
+    expect(activity.dayCounts.first.localDate, DateTime.utc(2025, 10, 4));
+    expect(activity.dayCounts.first.count, 1);
+    expect(activity.dayCounts.last.localDate, DateTime.utc(2026, 1, 1));
+    expect(activity.dayCounts.last.count, 1);
+  });
+
+  test('连续学习按精简时间戳扫描，跨月重复与未来记录不影响', () async {
+    const calendar = LocalCalendar(fixedOffset: Duration(hours: 8));
+    now = DateTime.utc(2026, 1, 1, 4);
+    final streakRepo = StudyRepository(
+      db,
+      engine,
+      nowUtc: () => now,
+      calendar: calendar,
+    );
+    addTearDown(streakRepo.dispose);
+    for (var i = 0; i < 300; i++) {
+      final reviewedAt = calendar
+          .midnightUtc(now, daysAhead: -i)
+          .add(const Duration(hours: 10));
+      await insertReviewRecord(
+        db,
+        engine,
+        reviewedAt: reviewedAt,
+        rating: 'good',
+      );
+    }
+    await insertReviewRecord(db, engine, reviewedAt: now, rating: 'easy');
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: calendar
+          .midnightUtc(now, daysAhead: 1)
+          .add(const Duration(hours: 10)),
+      rating: 'good',
+    );
+
+    final stats = await streakRepo.stats(asOf: now);
+    expect(stats.streak, 300);
+  });
+
+  test('连续学习支持昨天延续，遇断档停止并忽略同日重复', () async {
+    const calendar = LocalCalendar(fixedOffset: Duration(hours: 8));
+    now = DateTime.utc(2026, 1, 1, 4);
+    final streakRepo = StudyRepository(
+      db,
+      engine,
+      nowUtc: () => now,
+      calendar: calendar,
+    );
+    addTearDown(streakRepo.dispose);
+    final yesterday = calendar.midnightUtc(now, daysAhead: -1);
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: yesterday.add(const Duration(hours: 9)),
+      rating: 'good',
+    );
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: yesterday.add(const Duration(hours: 10)),
+      rating: 'easy',
+    );
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: calendar
+          .midnightUtc(now, daysAhead: -2)
+          .add(const Duration(hours: 10)),
+      rating: 'good',
+    );
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: calendar
+          .midnightUtc(now, daysAhead: -4)
+          .add(const Duration(hours: 10)),
+      rating: 'good',
+    );
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: calendar
+          .midnightUtc(now, daysAhead: 1)
+          .add(const Duration(hours: 9)),
+      rating: 'good',
+    );
+
+    final stats = await streakRepo.stats(asOf: now);
+    expect(stats.streak, 2);
+  });
+
+  test('统计过滤其他用户和训练方式，撤销后活动与连击归零', () async {
+    final item = (await repository.queue()).first;
+    final eventId = newReviewEventId();
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: now,
+      rating: 'good',
+      userId: 'other-user',
+    );
+    await insertReviewRecord(
+      db,
+      engine,
+      reviewedAt: now,
+      rating: 'good',
+      trainingMode: 'spelling',
+    );
+    await repository.score(item, fsrs.Rating.good, eventId: eventId);
+    var stats = await repository.stats(asOf: now);
+    expect(stats.total, 1);
+    expect(stats.today, 1);
+    expect(stats.streak, 1);
+    var activity = await repository.reviewActivity(days: 7, asOf: now);
+    expect(activity.ratingCount, 1);
+    expect(activity.activeDays, 1);
+    expect(activity.successRate, 1);
+
+    await repository.undoLastReview(eventId);
+    stats = await repository.stats(asOf: now);
+    activity = await repository.reviewActivity(days: 7, asOf: now);
+    expect(stats.total, 0);
+    expect(stats.today, 0);
+    expect(stats.streak, 0);
+    expect(activity.ratingCount, 0);
+    expect(activity.activeDays, 0);
+    expect(activity.successRate, isNull);
+  });
+
+  test('并发写入时活动汇总与每日合计保持一致', () async {
+    const calendar = LocalCalendar(fixedOffset: Duration(hours: 8));
+    now = DateTime.utc(2026, 1, 1, 4);
+    final activityRepo = StudyRepository(
+      db,
+      engine,
+      nowUtc: () => now,
+      calendar: calendar,
+    );
+    addTearDown(activityRepo.dispose);
+    final writes = [
+      for (var i = 0; i < 40; i++)
+        insertReviewRecord(
+          db,
+          engine,
+          reviewedAt: calendar
+              .midnightUtc(now, daysAhead: -(i % 20))
+              .add(Duration(hours: 10 + i % 3)),
+          rating: i % 3 == 0 ? 'hard' : 'good',
+        ),
+    ];
+    final reads = [
+      for (var i = 0; i < 8; i++)
+        activityRepo.reviewActivity(days: 30, asOf: now),
+    ];
+    await Future.wait(writes);
+    for (final activity in await Future.wait(reads)) {
+      expect(
+        activity.ratingCount,
+        activity.dayCounts.fold<int>(0, (sum, day) => sum + day.count),
+      );
+      expect(activity.goodEasyCount, lessThanOrEqualTo(activity.ratingCount));
+    }
+  });
+
+  test('活动汇总在单次事务快照中保持一致', () async {
+    const calendar = LocalCalendar(fixedOffset: Duration(hours: 8));
+    now = DateTime.utc(2026, 1, 1, 4);
+    final interceptor = _ActivitySnapshotInterceptor();
+    final snapshotDb = AppDatabase(
+      NativeDatabase.memory().interceptWith(interceptor),
+    );
+    await snapshotDb.ensureSeeded(
+      schedulerVersion: engine.schedulerVersion,
+      configurationJson: engine.configurationJson,
+    );
+    final snapshotRepo = StudyRepository(
+      snapshotDb,
+      engine,
+      nowUtc: () => now,
+      calendar: calendar,
+    );
+    addTearDown(() async {
+      await snapshotRepo.dispose();
+      await snapshotDb.close();
+    });
+
+    final read = snapshotRepo.reviewActivity(days: 30, asOf: now);
+    await interceptor.firstSelectReturned.future;
+    final insert = insertReviewRecord(
+      snapshotDb,
+      engine,
+      reviewedAt: now,
+      rating: 'good',
+    );
+    await Future<void>.delayed(Duration.zero);
+    interceptor.release.complete();
+    final activity = await read;
+    await insert;
+
+    expect(activity.ratingCount, 0);
+    expect(activity.dayCounts.fold<int>(0, (sum, day) => sum + day.count), 0);
+    expect(
+      (await snapshotRepo.reviewActivity(days: 30, asOf: now)).ratingCount,
+      1,
+    );
+  });
+}
+
+Future<void> insertReviewRecord(
+  AppDatabase db,
+  FsrsEngine engine, {
+  required DateTime reviewedAt,
+  required String rating,
+  String userId = localUserId,
+  String trainingMode = recognitionMode,
+}) => db
+    .into(db.reviewEvents)
+    .insert(
+      ReviewEventsCompanion.insert(
+        id: newReviewEventId(),
+        userId: userId,
+        wordSenseId: 1,
+        trainingMode: trainingMode,
+        reviewedAt: reviewedAt.millisecondsSinceEpoch,
+        rating: rating,
+        schedulerVersion: engine.schedulerVersion,
+        beforeJson: '{}',
+        afterJson: '{}',
+      ),
+    );
+
+class _ActivitySnapshotInterceptor extends QueryInterceptor {
+  final firstSelectReturned = Completer<void>();
+  final release = Completer<void>();
+  bool _paused = false;
+
+  @override
+  Future<List<Map<String, Object?>>> runSelect(
+    QueryExecutor executor,
+    String statement,
+    List<Object?> args,
+  ) async {
+    final result = await executor.runSelect(statement, args);
+    if (!_paused &&
+        statement.contains('COUNT(*) AS ratings') &&
+        statement.contains('review_events')) {
+      _paused = true;
+      firstSelectReturned.complete();
+      await release.future;
+    }
+    return result;
+  }
 }
 
 List<String> mapHistoryIds(List<ReviewEvent> events) =>
