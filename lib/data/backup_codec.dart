@@ -6,12 +6,19 @@ import '../core/clock.dart';
 import '../core/ids.dart';
 import '../domain/fsrs_engine.dart';
 import 'app_database.dart';
+import 'seed_catalog.dart';
 
 class BackupCodec {
-  BackupCodec(this.db, this.engine, {this.nowUtc = systemUtcNow});
+  BackupCodec(
+    this.db,
+    this.engine, {
+    this.nowUtc = systemUtcNow,
+    this.onRestored,
+  });
   final AppDatabase db;
   final FsrsEngine engine;
   final UtcClock nowUtc;
+  final void Function()? onRestored;
 
   Future<String> export() => db.transaction(
     () async => jsonEncode({
@@ -82,7 +89,10 @@ class BackupCodec {
         batch.insertAll(db.reviewEvents, data.events);
         batch.insertAll(db.appSettings, data.settings);
       });
+      // 旧版备份不包含应用自带的考试词书；补齐时仍处于恢复事务内。
+      await db.ensureExamWordbooks(reconcile: true);
     });
+    onRestored?.call();
   }
 
   void _validate(_Backup data, DateTime exportedAt) {
@@ -247,6 +257,14 @@ class BackupCodec {
       );
     }
     final settings = {for (final row in data.settings) row.key: row.value};
+    final activeBookId = settings['active_wordbook_id'];
+    // 老备份没有此设置；内置考试词书可以在恢复事务中补齐。
+    require(
+      activeBookId == null ||
+          bookIds.contains(activeBookId) ||
+          examWordbooks.containsKey(activeBookId),
+      '学习词书引用了不存在的自建词书。',
+    );
     final goal = int.tryParse(settings['daily_new_goal'] ?? '');
     require(
       goal != null &&

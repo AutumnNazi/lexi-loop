@@ -10,6 +10,7 @@ import 'package:lexi_loop/data/study_repository.dart';
 import 'package:lexi_loop/domain/fsrs_engine.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late AppDatabase db;
   late StudyRepository repository;
   late BackupCodec codec;
@@ -79,7 +80,7 @@ void main() {
     '字段类型错误': (root) => root['words'][0]['id'] = 'one',
     '重复单词': (root) =>
         root['words'][1]['spelling'] = root['words'][0]['spelling'],
-    '词义外键不存在': (root) => root['wordSenses'][0]['wordId'] = 999,
+    '词义外键不存在': (root) => root['wordSenses'][0]['wordId'] = 999999999,
     '不支持的用户': (root) => root['memoryStates'][0]['userId'] = 'another-user',
     '不支持的训练模式': (root) => root['memoryStates'][0]['trainingMode'] = 'spelling',
     '非法学习步骤': (root) => root['memoryStates'][0]['step'] = 9,
@@ -87,6 +88,10 @@ void main() {
     '微秒而非毫秒字段': (root) => root['memoryStates'][0]['lastReview'] *= 1000,
     '缺少历史': (root) => root['reviewEvents'] = [],
     '设置不完整': (root) => root['appSettings'] = [],
+    '学习词书不存在': (root) => (root['appSettings'] as List).add({
+      'key': 'active_wordbook_id',
+      'value': 'missing-custom-book',
+    }),
   };
   for (final mutation in mutations.entries) {
     test('备份校验拒绝${mutation.key}且不动原数据', () async {
@@ -155,5 +160,108 @@ void main() {
     expect(await codec.export(), source);
     final state = (await db.select(db.memoryStates).get()).single;
     expect(state.lastReview, now.millisecondsSinceEpoch);
+  });
+
+  test('旧版备份恢复后补齐考试词书并保留旧词义、目标和评分', () async {
+    await repository.score(
+      (await repository.queue()).first,
+      fsrs.Rating.good,
+      eventId: newReviewEventId(),
+    );
+    await repository.setDailyGoal(4);
+    final original = jsonDecode(await codec.export()) as Map<String, dynamic>;
+    original['words'] = (original['words'] as List)
+        .where((row) => row['id'] <= 24)
+        .toList();
+    original['wordSenses'] = (original['wordSenses'] as List)
+        .where((row) => row['id'] <= 24)
+        .toList();
+    original['wordbooks'] = (original['wordbooks'] as List)
+        .where((row) => row['id'] == 'everyday')
+        .toList();
+    original['wordbookEntries'] = (original['wordbookEntries'] as List)
+        .where((row) => row['wordbookId'] == 'everyday')
+        .toList();
+    original['appSettings'] = (original['appSettings'] as List)
+        .where((row) => row['key'] != 'exam_catalog_version')
+        .toList();
+    await repository.setActiveWordbook('cet6');
+    await codec.restore(jsonEncode(original));
+    expect(await repository.activeWordbook(), isNull);
+    expect(await repository.entries(wordbookId: 'cet4'), hasLength(3849));
+    expect(await repository.entries(wordbookId: 'cet6'), hasLength(5407));
+    expect(await repository.entries(wordbookId: 'tem8'), hasLength(12694));
+    expect(await repository.entries(wordbookId: 'ky'), hasLength(4801));
+    expect(await repository.dailyGoal(), 4);
+    expect(await repository.history(), hasLength(1));
+  });
+
+  test('考试词义组成的自建词书恢复后保留共享进度和内容', () async {
+    final items = await repository.entries(wordbookId: 'cet4', limit: 2);
+    await repository.createWordbook(
+      '考试错题本',
+      items.map((item) => item.sense.id).toSet(),
+    );
+    final book = (await repository.books()).singleWhere(
+      (book) => !book.isBuiltIn,
+    );
+    await repository.setActiveWordbook(book.id);
+    await repository.score(
+      items.first,
+      fsrs.Rating.good,
+      eventId: newReviewEventId(),
+    );
+    final source = await codec.export();
+    await repository.setDailyGoal(0);
+    await codec.restore(source);
+    expect((await repository.activeWordbook())?.id, book.id);
+    final restored = await repository.entries(wordbookId: book.id);
+    expect(
+      restored.map((item) => item.sense.id),
+      items.map((item) => item.sense.id),
+    );
+    expect(restored.first.memory, isNotNull);
+    expect(
+      (await repository.entries(
+        wordbookId: 'cet6',
+        wordId: items.first.word.id,
+      )).single.memory,
+      restored.first.memory,
+    );
+    expect(await codec.export(), source);
+  });
+
+  test('恢复遇到考试词书编号冲突时完整回滚且说明冲突', () async {
+    final source = await codec.export();
+    final changed = jsonDecode(source) as Map<String, dynamic>;
+    final cet4 = (changed['wordbooks'] as List).singleWhere(
+      (book) => book['id'] == 'cet4',
+    );
+    cet4['isBuiltIn'] = false;
+    cet4['name'] = '自定义四级';
+    await expectLater(
+      codec.restore(jsonEncode(changed)),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains('冲突'),
+        ),
+      ),
+    );
+    expect(await codec.export(), source);
+  });
+
+  test('恢复文件包含安装标记但遗漏考试词书时仍补齐内置内容', () async {
+    await repository.setActiveWordbook('ky');
+    final backup = jsonDecode(await codec.export()) as Map<String, dynamic>;
+    (backup['wordbooks'] as List).removeWhere((row) => row['id'] == 'ky');
+    (backup['wordbookEntries'] as List).removeWhere(
+      (row) => row['wordbookId'] == 'ky',
+    );
+    await codec.restore(jsonEncode(backup));
+    expect((await repository.activeWordbook())?.id, 'ky');
+    expect(await repository.entries(wordbookId: 'ky'), hasLength(4801));
+    expect(await repository.entryCount(), 13165);
   });
 }

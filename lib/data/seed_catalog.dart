@@ -1,5 +1,13 @@
 typedef SeedWord = ({String text, String definition, String example});
 
+// 用户提供的 ECDICT 离线选词包；来源与许可随 assets/wordbooks 分发。
+const examWordbooks = {
+  'cet4': (title: '大学英语四级', count: 3849),
+  'cet6': (title: '大学英语六级', count: 5407),
+  'tem8': (title: '英语专业八级', count: 12694),
+  'ky': (title: '考研英语', count: 4801),
+};
+
 // 原创示例仅用于演示学习闭环，不作为完整词典。
 const seedCatalog = <SeedWord>[
   (

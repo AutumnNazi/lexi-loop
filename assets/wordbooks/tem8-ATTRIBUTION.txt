@@ -1,0 +1,34 @@
+英语专业八级
+Source: https://github.com/skywind3000/ECDICT
+Revision: bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b
+License: MIT (ECDICT data)
+
+Definitions, phonetics and CET/考研 classification: ECDICT bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b.
+Not an official annual exam syllabus. No examples supplied.
+Headword selection only: mahavivo/english-wordlists at 395cebd583d97be61b065d281d16dc49c7e4a8b0, 英语专业四八级词汇表.txt.
+Source SHA256: ae4262fc683836adf9250ab708b71307ca4fea43fc3320ff78dde47eb5a89c1f.
+Only headwords are extracted; the source definitions and phonetics are not reproduced.
+Matched 12694 headwords to ECDICT; 26 unmatched spellings and 23 non-single-word rows omitted.
+
+MIT License
+
+Copyright (c) 2025 Linwei
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+

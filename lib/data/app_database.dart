@@ -1,8 +1,13 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
+import 'package:flutter/services.dart';
 
 import 'seed_catalog.dart';
 
 part 'app_database.g.dart';
+
+typedef _ExamWord = ({String spelling, String definition, String? phonetics});
 
 class Words extends Table {
   IntColumn get id => integer()();
@@ -137,9 +142,12 @@ class AppDatabase extends _$AppDatabase {
         );
       }
     }
+    await ensureExamWordbooks();
     for (final entry in {
       'seed_version': '1',
       'daily_new_goal': '10',
+      'theme_id': 'emerald',
+      'theme_mode': 'system',
       'desired_retention': '0.9',
       'scheduler_version': schedulerVersion,
       'scheduler_config': configurationJson,
@@ -150,4 +158,139 @@ class AppDatabase extends _$AppDatabase {
       );
     }
   });
+
+  // 包内词表只解析一次；每个数据库仍在自己的事务中导入。
+  static Future<Map<String, List<_ExamWord>>>? _examCatalog;
+
+  Future<void> ensureExamWordbooks({
+    bool reconcile = false,
+  }) => transaction(() async {
+    final installed =
+        await (select(appSettings)
+              ..where((row) => row.key.equals('exam_catalog_version')))
+            .getSingleOrNull();
+    if (installed?.value == '1' && !reconcile) return;
+    final catalog = await (_examCatalog ??= _loadExamCatalog());
+    final existingWords = await select(words).get();
+    final existingSenses = await select(wordSenses).get();
+    final existingBooks = {
+      for (final book in await select(wordbooks).get()) book.id: book,
+    };
+    final wordIds = {for (final word in existingWords) word.spelling: word.id};
+    final senseIds = {
+      for (final sense in existingSenses)
+        (sense.wordId, sense.definition): sense.id,
+    };
+    var nextWordId = existingWords.fold<int>(
+      0,
+      (id, word) => word.id > id ? word.id : id,
+    );
+    var nextSenseId = existingSenses.fold<int>(
+      0,
+      (id, sense) => sense.id > id ? sense.id : id,
+    );
+    final newWords = <WordsCompanion>[];
+    final newSenses = <WordSensesCompanion>[];
+    final newBooks = <WordbooksCompanion>[];
+    final entries = <WordbookEntriesCompanion>[];
+    for (final book in examWordbooks.entries) {
+      final existing = existingBooks[book.key];
+      if (existing != null && !existing.isBuiltIn) {
+        throw StateError('词书编号 ${book.key} 与自建词书冲突，无法导入考试词库。');
+      }
+      if (existing == null) {
+        newBooks.add(
+          WordbooksCompanion.insert(
+            id: book.key,
+            name: book.value.title,
+            isBuiltIn: const Value(true),
+          ),
+        );
+      }
+      for (final term in catalog[book.key]!) {
+        final wordId = wordIds.putIfAbsent(term.spelling, () {
+          final id = ++nextWordId;
+          newWords.add(
+            WordsCompanion.insert(id: Value(id), spelling: term.spelling),
+          );
+          return id;
+        });
+        // 完全相同的词义跨考试词书共享进度，保留已有的原创词义和评分。
+        final senseId = senseIds.putIfAbsent((wordId, term.definition), () {
+          final id = ++nextSenseId;
+          newSenses.add(
+            WordSensesCompanion.insert(
+              id: Value(id),
+              wordId: wordId,
+              definition: term.definition,
+              example: '',
+              phonetics: Value(term.phonetics),
+            ),
+          );
+          return id;
+        });
+        entries.add(
+          WordbookEntriesCompanion.insert(
+            wordbookId: book.key,
+            wordSenseId: senseId,
+          ),
+        );
+      }
+    }
+    await batch((batch) {
+      batch.insertAll(words, newWords);
+      batch.insertAll(wordSenses, newSenses);
+      batch.insertAll(wordbooks, newBooks);
+      batch.insertAll(
+        wordbookEntries,
+        entries,
+        mode: InsertMode.insertOrIgnore,
+      );
+      if (installed?.value != '1') {
+        batch.insert(
+          appSettings,
+          AppSettingsCompanion.insert(key: 'exam_catalog_version', value: '1'),
+          onConflict: DoUpdate(
+            (_) => const AppSettingsCompanion(value: Value('1')),
+          ),
+        );
+      }
+    });
+  });
+
+  static Future<Map<String, List<_ExamWord>>> _loadExamCatalog() async {
+    final catalog = <String, List<_ExamWord>>{};
+    for (final book in examWordbooks.entries) {
+      final source = await rootBundle.loadString(
+        'assets/wordbooks/${book.key}.jsonl',
+      );
+      final terms = <_ExamWord>[];
+      final spellings = <String>{};
+      for (final line in LineSplitter.split(source)) {
+        final record = jsonDecode(line) as Map<String, dynamic>;
+        final spelling = record['word'] as String;
+        final definition = (record['meaning'] as String)
+            .replaceAll(r'\r', '')
+            .trim();
+        final phonetics = record['phonetic'] as String?;
+        if (spelling.trim().isEmpty ||
+            definition.isEmpty ||
+            !spellings.add(spelling.toLowerCase())) {
+          throw FormatException('${book.value.title} 包含空词条或重复单词。');
+        }
+        terms.add((
+          spelling: spelling,
+          definition: definition,
+          phonetics: phonetics == null || phonetics.trim().isEmpty
+              ? null
+              : phonetics,
+        ));
+      }
+      if (terms.length != book.value.count) {
+        throw FormatException('${book.value.title} 的词条数量不正确。');
+      }
+      catalog[book.key] = terms;
+    }
+    return catalog;
+  }
 }

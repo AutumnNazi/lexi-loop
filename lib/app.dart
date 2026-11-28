@@ -1,6 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 
 import 'core/clock.dart';
+import 'core/theme_settings.dart';
 import 'data/app_database.dart';
 import 'data/backup_codec.dart';
 import 'data/study_repository.dart';
@@ -14,11 +15,18 @@ class AppDependencies {
     UtcClock nowUtc = systemUtcNow,
   }) {
     final engine = FsrsEngine();
+    final repository = StudyRepository(database, engine, nowUtc: nowUtc);
     return AppDependencies._(
       database,
       engine,
-      StudyRepository(database, engine, nowUtc: nowUtc),
-      BackupCodec(database, engine, nowUtc: nowUtc),
+      repository,
+      BackupCodec(
+        database,
+        engine,
+        nowUtc: nowUtc,
+        onRestored: repository.invalidateUndoEligibility,
+      ),
+      ThemeController(repository),
       nowUtc,
     );
   }
@@ -27,21 +35,53 @@ class AppDependencies {
     this.engine,
     this.repository,
     this.backup,
+    this.theme,
     this.nowUtc,
   );
   final AppDatabase database;
   final FsrsEngine engine;
   final StudyRepository repository;
   final BackupCodec backup;
+  final ThemeController theme;
   final UtcClock nowUtc;
 
-  Future<void> initialize() => database.ensureSeeded(
-    schedulerVersion: engine.schedulerVersion,
-    configurationJson: engine.configurationJson,
-  );
+  Future<void> initialize() async {
+    await database.ensureSeeded(
+      schedulerVersion: engine.schedulerVersion,
+      configurationJson: engine.configurationJson,
+    );
+    await theme.load();
+  }
+
+  Future<void> reloadTheme() => theme.load();
+
   Future<void> dispose() async {
+    theme.dispose();
     await repository.dispose();
     await database.close();
+  }
+}
+
+class ThemeController extends ChangeNotifier {
+  ThemeController(this.repository);
+
+  final StudyRepository repository;
+  ThemeSettings _settings = ThemeSettings.defaults;
+
+  ThemeSettings get settings => _settings;
+
+  Future<void> load() async {
+    final loaded = await repository.loadThemeSettings();
+    if (_settings == loaded) return;
+    _settings = loaded;
+    notifyListeners();
+  }
+
+  Future<void> save(ThemeSettings settings) async {
+    await repository.saveThemeSettings(settings);
+    if (_settings == settings) return;
+    _settings = settings;
+    notifyListeners();
   }
 }
 
@@ -50,14 +90,25 @@ class LexiLoopApp extends StatelessWidget {
   final AppDependencies dependencies;
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'Lexi Loop',
-    debugShowCheckedModeBanner: false,
-    locale: const Locale('zh', 'CN'),
-    supportedLocales: const [Locale('zh', 'CN')],
-    localizationsDelegates: GlobalMaterialLocalizations.delegates,
-    theme: journalTheme(Brightness.light),
-    darkTheme: journalTheme(Brightness.dark),
-    home: AppShell(dependencies: dependencies),
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: dependencies.theme,
+    builder: (context, _) {
+      final settings = dependencies.theme.settings;
+      return MaterialApp(
+        title: 'Lexi Loop',
+        debugShowCheckedModeBanner: false,
+        locale: const Locale('zh', 'CN'),
+        supportedLocales: const [Locale('zh', 'CN')],
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
+        theme: journalTheme(Brightness.light, themeId: settings.themeId),
+        darkTheme: journalTheme(Brightness.dark, themeId: settings.themeId),
+        themeMode: switch (settings.mode) {
+          AppThemeMode.system => ThemeMode.system,
+          AppThemeMode.light => ThemeMode.light,
+          AppThemeMode.dark => ThemeMode.dark,
+        },
+        home: AppShell(dependencies: dependencies),
+      );
+    },
   );
 }

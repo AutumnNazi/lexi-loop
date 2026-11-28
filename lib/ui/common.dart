@@ -1,5 +1,6 @@
 import 'package:material_ui/material_ui.dart';
 
+import '../data/app_database.dart';
 import 'journal_style.dart';
 
 class PageFrame extends StatelessWidget {
@@ -9,81 +10,108 @@ class PageFrame extends StatelessWidget {
     required this.subtitle,
     required this.children,
     this.actions = const [],
+    this.maxWidth = 1040,
+    this.scrollable = true,
   });
+
   final String title;
   final String subtitle;
   final List<Widget> children;
   final List<Widget> actions;
+  final double maxWidth;
+  final bool scrollable;
 
   @override
-  Widget build(BuildContext context) => SingleChildScrollView(
-    padding: EdgeInsets.fromLTRB(
-      MediaQuery.sizeOf(context).width < 600 ? 22 : 40,
-      12,
-      MediaQuery.sizeOf(context).width < 600 ? 22 : 40,
-      32,
-    ),
-    child: Align(
-      alignment: Alignment.topCenter,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 880),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(title, style: Theme.of(context).textTheme.headlineMedium),
-            const SizedBox(height: 8),
-            Text(
-              subtitle,
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-            if (actions.isNotEmpty) ...[
-              const SizedBox(height: 20),
-              Wrap(spacing: 12, runSpacing: 12, children: actions),
+  Widget build(BuildContext context) {
+    final tokens = JournalTokens.of(context);
+    final width = MediaQuery.sizeOf(context).width;
+    final compact = width < 600;
+    final horizontal = compact ? 18.0 : 36.0;
+    final top = compact ? 8.0 : 28.0;
+    final inlineActions = width >= 720 && actions.isNotEmpty;
+
+    final headerText = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: Theme.of(context).textTheme.headlineMedium),
+        const SizedBox(height: 6),
+        Text(
+          subtitle,
+          style: Theme.of(context).textTheme.bodyMedium
+              ?.copyWith(color: tokens.inkSecondary),
+        ),
+      ],
+    );
+
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (inlineActions)
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(child: headerText),
+              const SizedBox(width: 20),
+              Wrap(spacing: 10, runSpacing: 10, children: actions),
             ],
-            const SizedBox(height: 24),
-            ...children,
+          )
+        else ...[
+          headerText,
+          if (actions.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Wrap(spacing: 10, runSpacing: 10, children: actions),
           ],
+        ],
+        SizedBox(height: compact ? 18 : 24),
+        ...children,
+      ],
+    );
+
+    final inner = Padding(
+      padding: EdgeInsets.fromLTRB(horizontal, top, horizontal, 28),
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxWidth),
+          child: content,
         ),
       ),
-    ),
-  );
+    );
+
+    if (!scrollable) return inner;
+    return SingleChildScrollView(child: inner);
+  }
 }
 
 class StatStrip extends StatelessWidget {
-  const StatStrip({super.key, required this.items});
+  const StatStrip({super.key, required this.items, this.accentIndex});
   final List<({String label, String value})> items;
+  final int? accentIndex;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) => Wrap(
-      spacing: 16,
-      runSpacing: 20,
-      children: items
-          .map(
-            (item) => SizedBox(
-              width: constraints.maxWidth < 420
-                  ? (constraints.maxWidth - 16) / 2
-                  : (constraints.maxWidth - 48) / 4,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.value,
-                    style: Theme.of(context).textTheme.headlineMedium,
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    item.label,
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                ],
-              ),
+    builder: (context, constraints) {
+      final twoColumns = constraints.maxWidth < 480;
+      final spacing = 16.0;
+      final cellWidth = twoColumns
+          ? (constraints.maxWidth - spacing) / 2
+          : (constraints.maxWidth - spacing * 3) / 4;
+      return Wrap(
+        spacing: spacing,
+        runSpacing: 16,
+        children: List.generate(items.length, (i) {
+          final item = items[i];
+          return SizedBox(
+            width: cellWidth,
+            child: MetricCell(
+              label: item.label,
+              value: item.value,
+              accent: accentIndex == i,
             ),
-          )
-          .toList(),
-    ),
+          );
+        }),
+      );
+    },
   );
 }
 
@@ -101,33 +129,48 @@ class MessagePanel extends StatelessWidget {
   final IconData icon;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 24),
-    child: Column(
-      children: [
-        JournalIcon(
-          icon,
-          size: 52,
-          color: Theme.of(context).colorScheme.primary,
-        ),
-        const SizedBox(height: 20),
-        Text(
-          title,
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.titleLarge,
-        ),
-        const SizedBox(height: 12),
-        Text(message, textAlign: TextAlign.center),
-        if (action != null) ...[const SizedBox(height: 20), action!],
-      ],
-    ),
-  );
+  Widget build(BuildContext context) {
+    final tokens = JournalTokens.of(context);
+    return JournalSurface(
+      variant: JournalSurfaceVariant.muted,
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+      child: Column(
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: tokens.surface,
+              shape: BoxShape.circle,
+              border: Border.all(color: tokens.border),
+            ),
+            alignment: Alignment.center,
+            child: JournalIcon(icon, size: 28, color: tokens.primary),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodyMedium
+                ?.copyWith(color: tokens.inkSecondary),
+          ),
+          if (action != null) ...[const SizedBox(height: 20), action!],
+        ],
+      ),
+    );
+  }
 }
 
 Widget journalBackButton(BuildContext context) => IconButton(
   tooltip: '返回',
   onPressed: () => Navigator.of(context).maybePop(),
-  icon: const JournalIcon(Icons.arrow_back),
+  icon: const JournalIcon(Icons.arrow_back, size: 22),
 );
 
 class AsyncContent<T> extends StatelessWidget {
@@ -164,6 +207,24 @@ class AsyncContent<T> extends StatelessWidget {
       return builder(snapshot.data as T);
     },
   );
+}
+
+({String label, bool isDue, StatusBadgeTone tone}) memoryStageInfo(
+  MemoryStateRow? memory,
+  DateTime nowUtc,
+) {
+  if (memory == null) {
+    return (label: '尚未学习', isDue: false, tone: StatusBadgeTone.newWord);
+  }
+  final isDue = memory.due <= nowUtc.millisecondsSinceEpoch;
+  if (isDue) {
+    return (label: '待复习', isDue: true, tone: StatusBadgeTone.due);
+  }
+  return switch (memory.state) {
+    1 => (label: '学习中', isDue: false, tone: StatusBadgeTone.learning),
+    2 => (label: '复习中', isDue: false, tone: StatusBadgeTone.review),
+    _ => (label: '重新学习', isDue: false, tone: StatusBadgeTone.relearning),
+  };
 }
 
 String intervalLabel(Duration duration) {
