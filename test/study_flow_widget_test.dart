@@ -2489,110 +2489,117 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('统计活动默认近 7 天并可切换 30/90 天查看日期与次数', (tester) async {
-    await surface(tester, width: 390, scale: 1.5);
-    final calendar = dependencies.repository.calendar;
-    Future<void> insertReview(DateTime at, String rating) => dependencies
-        .database
-        .into(dependencies.database.reviewEvents)
-        .insert(
-          ReviewEventsCompanion.insert(
-            id: newReviewEventId(),
-            userId: localUserId,
-            wordSenseId: 1,
-            trainingMode: recognitionMode,
-            reviewedAt: at.millisecondsSinceEpoch,
-            rating: rating,
-            schedulerVersion: dependencies.engine.schedulerVersion,
-            beforeJson: '{}',
-            afterJson: '{}',
-          ),
+  for (final localHour in [0, 8, 16]) {
+    testWidgets('统计活动在本地 $localHour 时可切换 7/30/90 天查看日期与次数', (tester) async {
+      now = DateTime(2026, 11, 27, localHour).toUtc();
+      await surface(tester, width: 390, scale: 1.5);
+      final calendar = dependencies.repository.calendar;
+      Future<void> insertReview(DateTime at, String rating) => dependencies
+          .database
+          .into(dependencies.database.reviewEvents)
+          .insert(
+            ReviewEventsCompanion.insert(
+              id: newReviewEventId(),
+              userId: localUserId,
+              wordSenseId: 1,
+              trainingMode: recognitionMode,
+              reviewedAt: at.millisecondsSinceEpoch,
+              rating: rating,
+              schedulerVersion: dependencies.engine.schedulerVersion,
+              beforeJson: '{}',
+              afterJson: '{}',
+            ),
+          );
+      for (final day in [
+        (0, 'good'),
+        (-1, 'hard'),
+        (-20, 'easy'),
+        (-65, 'good'),
+      ]) {
+        await insertReview(
+          day.$1 == 0
+              ? now
+              : calendar
+                    .midnightUtc(now, daysAhead: day.$1)
+                    .add(const Duration(hours: 12)),
+          day.$2,
         );
-    for (final day in [
-      (0, 'good'),
-      (-1, 'hard'),
-      (-20, 'easy'),
-      (-65, 'good'),
-    ]) {
-      await insertReview(
-        calendar
-            .midnightUtc(now, daysAhead: day.$1)
-            .add(const Duration(hours: 12)),
-        day.$2,
-      );
-    }
-    final signal = ValueNotifier<int>(0);
-    addTearDown(signal.dispose);
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: journalTheme(Brightness.light),
-        home: Scaffold(
-          body: StatsPage(
-            dependencies: dependencies,
-            refreshListenable: signal,
+      }
+      // 今天的样本必须已发生；未来记录在所有本地时段都不计入活动。
+      await insertReview(now.add(const Duration(hours: 1)), 'easy');
+      final signal = ValueNotifier<int>(0);
+      addTearDown(signal.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: journalTheme(Brightness.light),
+          home: Scaffold(
+            body: StatsPage(
+              dependencies: dependencies,
+              refreshListenable: signal,
+            ),
           ),
         ),
-      ),
-    );
-    await tester.pumpAndSettle();
+      );
+      await tester.pumpAndSettle();
 
-    final seven = find.byKey(const ValueKey('stats-activity-period-7'));
-    final thirty = find.byKey(const ValueKey('stats-activity-period-30'));
-    final ninety = find.byKey(const ValueKey('stats-activity-period-90'));
-    expect(seven, findsOneWidget);
-    expect(thirty, findsOneWidget);
-    expect(ninety, findsOneWidget);
-    expect(tester.widget<ChoiceChip>(seven).selected, isTrue);
-    expect(find.byKey(const ValueKey('stats-activity-bars')), findsOneWidget);
-    expect(textAtKey(tester, 'stats-activity-rating-count'), '2');
-    expect(textAtKey(tester, 'stats-activity-active-days'), '2');
-    expect(textAtKey(tester, 'stats-activity-success-rate'), '50%');
+      final seven = find.byKey(const ValueKey('stats-activity-period-7'));
+      final thirty = find.byKey(const ValueKey('stats-activity-period-30'));
+      final ninety = find.byKey(const ValueKey('stats-activity-period-90'));
+      expect(seven, findsOneWidget);
+      expect(thirty, findsOneWidget);
+      expect(ninety, findsOneWidget);
+      expect(tester.widget<ChoiceChip>(seven).selected, isTrue);
+      expect(find.byKey(const ValueKey('stats-activity-bars')), findsOneWidget);
+      expect(textAtKey(tester, 'stats-activity-rating-count'), '2');
+      expect(textAtKey(tester, 'stats-activity-active-days'), '2');
+      expect(textAtKey(tester, 'stats-activity-success-rate'), '50%');
 
-    await tester.ensureVisible(thirty);
-    await tester.tap(thirty);
-    await tester.pumpAndSettle();
-    expect(tester.widget<ChoiceChip>(thirty).selected, isTrue);
-    expect(find.byKey(const ValueKey('stats-activity-grid')), findsOneWidget);
-    expect(textAtKey(tester, 'stats-activity-rating-count'), '3');
-    expect(textAtKey(tester, 'stats-activity-active-days'), '3');
-    expect(textAtKey(tester, 'stats-activity-success-rate'), '67%');
+      await tester.ensureVisible(thirty);
+      await tester.tap(thirty);
+      await tester.pumpAndSettle();
+      expect(tester.widget<ChoiceChip>(thirty).selected, isTrue);
+      expect(find.byKey(const ValueKey('stats-activity-grid')), findsOneWidget);
+      expect(textAtKey(tester, 'stats-activity-rating-count'), '3');
+      expect(textAtKey(tester, 'stats-activity-active-days'), '3');
+      expect(textAtKey(tester, 'stats-activity-success-rate'), '67%');
 
-    signal.value++;
-    await tester.pumpAndSettle();
-    expect(tester.widget<ChoiceChip>(thirty).selected, isTrue);
-    expect(find.byKey(const ValueKey('stats-activity-grid')), findsOneWidget);
+      signal.value++;
+      await tester.pumpAndSettle();
+      expect(tester.widget<ChoiceChip>(thirty).selected, isTrue);
+      expect(find.byKey(const ValueKey('stats-activity-grid')), findsOneWidget);
 
-    final twentyDaysAgo = calendar.local(
-      calendar.midnightUtc(now, daysAhead: -20),
-    );
-    final dayCell = find.byKey(
-      ValueKey(
-        'activity-day-${twentyDaysAgo.year}-${twentyDaysAgo.month}-${twentyDaysAgo.day}',
-      ),
-    );
-    await tester.ensureVisible(dayCell);
-    await tester.tap(dayCell);
-    await tester.pumpAndSettle();
-    expect(
-      find.text(
-        '${twentyDaysAgo.year} 年 ${twentyDaysAgo.month} 月 ${twentyDaysAgo.day} 日',
-      ),
-      findsOneWidget,
-    );
-    expect(find.text('1 次评分'), findsOneWidget);
-    await tester.tap(find.text('关闭'));
-    await tester.pumpAndSettle();
+      final twentyDaysAgo = calendar.local(
+        calendar.midnightUtc(now, daysAhead: -20),
+      );
+      final dayCell = find.byKey(
+        ValueKey(
+          'activity-day-${twentyDaysAgo.year}-${twentyDaysAgo.month}-${twentyDaysAgo.day}',
+        ),
+      );
+      await tester.ensureVisible(dayCell);
+      await tester.tap(dayCell);
+      await tester.pumpAndSettle();
+      expect(
+        find.text(
+          '${twentyDaysAgo.year} 年 ${twentyDaysAgo.month} 月 ${twentyDaysAgo.day} 日',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('1 次评分'), findsOneWidget);
+      await tester.tap(find.text('关闭'));
+      await tester.pumpAndSettle();
 
-    await tester.ensureVisible(ninety);
-    await tester.tap(ninety);
-    await tester.pumpAndSettle();
-    expect(tester.widget<ChoiceChip>(ninety).selected, isTrue);
-    expect(textAtKey(tester, 'stats-activity-rating-count'), '4');
-    expect(textAtKey(tester, 'stats-activity-active-days'), '4');
-    expect(textAtKey(tester, 'stats-activity-success-rate'), '75%');
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox());
-  });
+      await tester.ensureVisible(ninety);
+      await tester.tap(ninety);
+      await tester.pumpAndSettle();
+      expect(tester.widget<ChoiceChip>(ninety).selected, isTrue);
+      expect(textAtKey(tester, 'stats-activity-rating-count'), '4');
+      expect(textAtKey(tester, 'stats-activity-active-days'), '4');
+      expect(textAtKey(tester, 'stats-activity-success-rate'), '75%');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
 
   testWidgets('统计活动零记录时成功率显示破折号', (tester) async {
     await surface(tester, width: 390, scale: 1.5);

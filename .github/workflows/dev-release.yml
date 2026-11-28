@@ -12,16 +12,22 @@ permissions:
 
 concurrency:
   group: dev-release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   FLUTTER_VERSION: '3.50.1'
 
 jobs:
   verify:
-    name: Analyze and test
+    name: Analyze and test (${{ matrix.timezone }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        timezone: [UTC, Asia/Shanghai]
+    env:
+      TZ: ${{ matrix.timezone }}
     steps:
       - uses: actions/checkout@v7
       - uses: subosito/flutter-action@v2
@@ -123,21 +129,133 @@ jobs:
           pattern: dev-*
           merge-multiple: true
           path: dist
-      - name: Publish prerelease for this commit
+      - name: Update fixed dev prerelease
+        shell: python
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: dev-${{ github.run_number }}-${{ github.run_attempt }}
+          RELEASE_TAG: dev
           COMMIT_SHA: ${{ github.sha }}
         run: |
-          cat > release-notes.md <<'NOTES'
-          Lexi Loop 开发版，自动构建自 dev 分支。
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import tempfile
 
-          - Windows：解压完整文件夹后运行 lexi_loop.exe。
-          - Android：开发签名 APK，后续构建可能使用不同开发签名；换包前请导出学习备份。
-          - macOS：未公证的应用包。
-          - iOS：未签名的 .app 构建产物，需要自行签名，不能直接安装到 iPhone。
+          def gh(*args):
+              result = subprocess.run(["gh", *args], check=True, text=True, capture_output=True)
+              return result.stdout.strip()
 
-          静态检查与自动测试通过后才构建，所有平台构建成功后才发布。
-          NOTES
-          gh release create "$RELEASE_TAG" dist/* --repo "$GH_REPO" --target "$COMMIT_SHA" --prerelease --title "Lexi Loop Dev $RELEASE_TAG" --notes-file release-notes.md
+          def api(path, method="GET", **fields):
+              args = ["api", f"repos/{repo}/{path}", "--method", method]
+              for key, value in fields.items():
+                  flag = "-F" if isinstance(value, bool) else "-f"
+                  args.extend([flag, f"{key}={str(value).lower() if isinstance(value, bool) else value}"])
+              result = gh(*args)
+              return json.loads(result) if result else None
+
+          repo = os.environ["GH_REPO"]
+          tag = os.environ["RELEASE_TAG"]
+          sha = os.environ["COMMIT_SHA"]
+          run = f'{os.environ["GITHUB_RUN_ID"]}-{os.environ["GITHUB_RUN_ATTEMPT"]}'
+          names = ["lexi-loop-windows-x64.zip", "lexi-loop-android.apk",
+                   "lexi-loop-macos-unsigned.zip", "lexi-loop-ios-unsigned-app.zip"]
+          files = [Path("dist") / name for name in names]
+          if any(not path.is_file() or path.stat().st_size == 0 for path in files):
+              raise RuntimeError("Missing or empty build artifact")
+          notes = (
+              f"Lexi Loop 最新开发版，自动构建自 dev 分支。\n\n提交：`{sha}`\n\n"
+              "- Windows：解压完整文件夹后运行 lexi_loop.exe。\n"
+              "- Android：开发签名 APK，更新前请导出学习备份；不同构建的签名可能不同。\n"
+              "- macOS：未公证的应用包。\n"
+              "- iOS：未签名的 .app，需自行签名，不能直接安装到 iPhone。\n\n"
+              "四端构建全部成功后更新此固定开发版；此版本不代表真机交互已验收。\n"
+          )
+          releases = json.loads(gh("api", f"repos/{repo}/releases", "--paginate", "--slurp"))
+          previous = next((r for page in releases for r in page if r["tag_name"] == tag), None)
+          refs = api(f"git/matching-refs/tags/{tag}")
+          old_ref = next((r for r in refs if r["ref"] == f"refs/tags/{tag}"), None)
+          old_sha = old_ref["object"]["sha"] if old_ref else None
+          release = previous
+          renamed = []
+          tag_attempted = False
+          metadata_attempted = False
+          prefix = f"next-{run}-"
+          try:
+              if release is None:
+                  release = api("releases", "POST", tag_name=tag, target_commitish=sha,
+                                name="Lexi Loop Dev", body=notes, draft=True, prerelease=True)
+              old_assets = api(f'releases/{release["id"]}/assets?per_page=100')
+              with tempfile.TemporaryDirectory() as directory:
+                  staged = []
+                  for path in files:
+                      target = Path(directory) / (prefix + path.name)
+                      shutil.copyfile(path, target)
+                      staged.append(str(target))
+                  # 不用 --clobber：全部上传并校验后才动旧下载入口。
+                  gh("release", "upload", tag, *staged, "--repo", repo)
+              assets = api(f'releases/{release["id"]}/assets?per_page=100')
+              incoming = []
+              for path in files:
+                  asset = next(a for a in assets if a["name"] == prefix + path.name)
+                  digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+                  if (asset["state"] != "uploaded" or asset["size"] != path.stat().st_size
+                          or asset.get("digest") not in (None, digest)):
+                      raise RuntimeError(f"Artifact verification failed: {path.name}")
+                  incoming.append((asset, path.name))
+              for asset in old_assets:
+                  renamed.append((asset["id"], asset["name"]))
+                  api(f'releases/assets/{asset["id"]}', "PATCH",
+                      name=f'previous-{run}-{asset["id"]}')
+              for asset, name in incoming:
+                  renamed.append((asset["id"], asset["name"]))
+                  api(f'releases/assets/{asset["id"]}', "PATCH", name=name)
+              current_refs = api(f"git/matching-refs/tags/{tag}")
+              tag_exists = any(ref["ref"] == f"refs/tags/{tag}" for ref in current_refs)
+              tag_attempted = True
+              if tag_exists:
+                  api(f"git/refs/tags/{tag}", "PATCH", sha=sha, force=True)
+              else:
+                  api("git/refs", "POST", ref=f"refs/tags/{tag}", sha=sha)
+              metadata_attempted = True
+              api(f'releases/{release["id"]}', "PATCH", name="Lexi Loop Dev",
+                  target_commitish=sha, body=notes, draft=False, prerelease=True, make_latest="false")
+          except Exception as error:
+              # API 失败时尽力恢复名称、标签与说明，始终让 CI 显式失败。
+              print(f"Release update failed: {error}", flush=True)
+              if isinstance(error, subprocess.CalledProcessError):
+                  print(error.stderr, flush=True)
+              rollback_errors = []
+              def rollback(path, method, **fields):
+                  try:
+                      api(path, method, **fields)
+                  except Exception as failure:
+                      rollback_errors.append(str(failure))
+              if metadata_attempted and previous:
+                  rollback(f'releases/{previous["id"]}', "PATCH", name=previous["name"],
+                           body=previous["body"] or "", target_commitish=previous["target_commitish"],
+                           draft=previous["draft"], prerelease=previous["prerelease"])
+              if tag_attempted:
+                  if old_sha:
+                      rollback(f"git/refs/tags/{tag}", "PATCH", sha=old_sha, force=True)
+                  else:
+                      rollback(f"git/refs/tags/{tag}", "DELETE")
+              for asset_id, name in reversed(renamed):
+                  rollback(f"releases/assets/{asset_id}", "PATCH", name=name)
+              if release and not rollback_errors:
+                  if previous is None:
+                      rollback(f'releases/{release["id"]}', "DELETE")
+                  else:
+                      for asset in api(f'releases/{release["id"]}/assets?per_page=100'):
+                          if asset["name"].startswith(prefix):
+                              rollback(f'releases/assets/{asset["id"]}', "DELETE")
+              if rollback_errors:
+                  print("Rollback needs attention: " + "; ".join(rollback_errors), flush=True)
+              raise
+          # 新包、标签和发布说明均已切换，再清除上一批附件。
+          for asset in old_assets:
+              api(f'releases/assets/{asset["id"]}', "DELETE")
+          print(f"Published https://github.com/{repo}/releases/tag/{tag} at {sha}")
